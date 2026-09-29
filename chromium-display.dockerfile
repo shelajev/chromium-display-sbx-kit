@@ -58,14 +58,17 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
 # not describe. Bump both chromium args in chromium-display.yaml.
 RUN --mount=type=secret,id=proxy-ca,required=false,mode=0444 <<'EOF'
 set -eu
-if [ -s /run/secrets/proxy-ca ]; then
-  echo 'Acquire::https::CAInfo "/run/secrets/proxy-ca";' > /etc/apt/apt.conf.d/99proxy-ca
-fi
+# apt's HTTPS method trusts OpenSSL's default paths (/usr/lib/ssl), which
+# debian:trixie does not have, so the bundle is named explicitly — the proxy's
+# when one is given, the copied public bundle otherwise.
+ca=/etc/ssl/certs/ca-certificates.crt
+if [ -s /run/secrets/proxy-ca ]; then ca=/run/secrets/proxy-ca; fi
+echo "Acquire::https::CAInfo \"$ca\";" > /etc/apt/apt.conf.d/99ca
 apt-get update
 apt-get install -y --no-install-recommends \
   "chromium=${CHROMIUM_VERSION}-${CHROMIUM_DEBIAN_REVISION}" \
   fontconfig fonts-liberation fonts-dejavu-core fonts-noto-color-emoji xkb-data
-rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99proxy-ca
+rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99ca
 /usr/lib/chromium/chromium --version | grep -q "^Chromium ${CHROMIUM_VERSION} "
 EOF
 
@@ -170,16 +173,16 @@ RUN sh /tmp/test/smoke.sh closure
 # DevTools port with it); this base just does not have it.
 RUN --mount=type=secret,id=proxy-ca,required=false,mode=0444 <<'EOF'
 set -eu
-if [ -s /run/secrets/proxy-ca ]; then
-  echo 'Acquire::https::CAInfo "/run/secrets/proxy-ca";' > /etc/apt/apt.conf.d/99proxy-ca
-fi
+ca=/etc/ssl/certs/ca-certificates.crt
+if [ -s /run/secrets/proxy-ca ]; then ca=/run/secrets/proxy-ca; fi
+echo "Acquire::https::CAInfo \"$ca\";" > /etc/apt/apt.conf.d/99ca
 sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/*.sources
 # Separate commands, not `update && install`: set -e does not stop on the left
 # side of an && list, and that once let this step "pass" without curl.
 apt-get update
 apt-get install -y --no-install-recommends curl
 curl --version | head -1
-rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99proxy-ca
+rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99ca
 EOF
 RUN sh /tmp/test/smoke.sh
 RUN <<'EOF'
