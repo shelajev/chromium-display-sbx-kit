@@ -1,0 +1,148 @@
+# syntax=docker/sandbox-kit:3
+# A browser for any agent, as a v3 MIXIN, replacing the v2 spec.yaml plus
+# its saved template (docker.io/olegselajev241/sbx-chromium-claude). The
+# deltas are marked MIGRATION NOTE inline.
+#
+# What the conversion is worth, in one line: v2 needed a hand-made template
+# image with Claude baked into it, then wrote scripts and MCP config into the
+# workspace on every boot. This ships the browser in its layers and layers
+# onto whichever agent workload you run — claude, codex, gemini, cursor,
+# opencode — with that agent's own, current version.
+#
+# MIGRATION NOTE: one browser path instead of two. v2 offered the
+# chrome-devtools MCP server attached to the shared `sbx-chrome` browser AND
+# a Playwright MCP server launching its own Chromium from a second profile.
+# Playwright MCP, the Playwright Chromium build, and SLICC are gone: the
+# chrome-devtools server covers navigation, input, snapshots, screenshots,
+# network and console, and now WebMCP — against the one window you can see.
+schemaVersion: "3"
+displayName: Chromium + DevTools MCP (display)
+description: >-
+  Chromium with the chrome-devtools MCP server (WebMCP tools enabled),
+  registered with whichever agent is installed. With `sbx run --display` the
+  browser window appears on your desktop and you and the agent drive the same
+  one; without a display it runs headless. Layer it onto any agent workload.
+sourceUrl: https://github.com/shelajev/chromium-display-sbx-kit
+
+# Everything that ships in the overlay: the kit's own scripts (Apache-2.0),
+# Chromium (BSD-3-Clause, plus the notices in share/doc), chrome-devtools-mcp
+# (Apache-2.0), node (MIT), and the bundled fonts (OFL-1.1 for Liberation and
+# Noto Color Emoji, Bitstream-Vera for DejaVu). The library closure is under
+# the usual mix of LGPL/MIT/BSD; the SBOM attestation carries the full list.
+licenses:
+  - Apache-2.0
+  - BSD-3-Clause
+  - MIT
+  - OFL-1.1
+  - Bitstream-Vera
+  - LGPL-2.1-or-later
+
+kind: mixin
+
+# MIGRATION NOTE: v2 had no version at all, so the published kit said nothing
+# about what it contained. 2.0.0 because this is a breaking change for anyone
+# running the v2 command: no --template, and no Playwright MCP.
+#
+# The release tag is the source of truth: publish.yml passes the git tag
+# (minus its leading v) as the `kitVersion` arg, so the tag, the published
+# image tag and the version annotation cannot disagree. The default is what a
+# local build without the arg reports.
+version: "${{ kit.args.kitVersion }}"
+
+args:
+  kitVersion:
+    default: "2.0.0"
+    pattern: '^[0-9]+(\.[0-9A-Za-z-]+)*$'
+    description: This kit's own release version (set from the git tag in CI)
+    # A build-phase arg is what the frontend expands into the published
+    # descriptor; the recipe itself never reads it.
+    buildArg: KIT_VERSION
+  chromium:
+    default: "154.0.8037.57"
+    pattern: '^[0-9]+(\.[0-9]+){3}$'
+    description: Debian trixie chromium upstream version (must be >= 150 for WebMCP)
+    buildArg: CHROMIUM_VERSION
+  # Split from the version above because Debian's revision carries a tilde,
+  # which a provide cannot. Bump the two together; the build fails on a pair
+  # the mirror no longer has.
+  chromiumDebianRevision:
+    default: "1~deb13u1"
+    pattern: '^[0-9A-Za-z.+~]+$'
+    description: Debian revision of the chromium package
+    buildArg: CHROMIUM_DEBIAN_REVISION
+  devtoolsMcp:
+    default: "1.10.1"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: chrome-devtools-mcp release to bundle
+    buildArg: DEVTOOLS_MCP_VERSION
+
+# Both pins are enforced by the build: it re-reads the installed Chromium and
+# the packed chrome-devtools-mcp and fails on a mismatch.
+provides:
+  - chromium@${{ kit.args.chromium }}
+  - chrome-devtools-mcp@${{ kit.args.devtoolsMcp }}
+
+# No `requires`: the overlay carries its own libraries, fonts and node, so it
+# needs only the platform floor (bash, sh, curl, the agent user) plus glibc
+# >= 2.41, and libc is not something `requires` can name.
+#
+# `integrates` puts each agent kit ahead of this one in composition order, so
+# the agent's own install hooks — which (re)write ~/.claude.json and
+# ~/.codex/config.toml wholesale — run before this kit merges its MCP entry
+# into them. None of them is required; registration skips absent agents.
+integrates:
+  - claude
+  - codex
+  - gemini
+  - cursor
+  - opencode
+
+capabilities:
+  # MIGRATION NOTE: no network-policy entry, and that is the point of
+  # prebuilding. v2's allow list (registry.npmjs.org, nodejs.org, four
+  # Playwright CDNs, *.azureedge.net, github.com and six Ubuntu mirrors)
+  # existed only for installs at create; there are none now, and the MCP
+  # server runs with update checks, usage statistics and CrUX lookups off.
+  #
+  # What the browser itself may reach is deliberately left to the sandbox's
+  # policy rather than granted here: a kit cannot know which sites you want
+  # an agent-driven browser to open, and a mixin's allow entries widen every
+  # composition it joins. Allow what you browse with `sbx policy allow
+  # network <host>`, or approve requests as they come.
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      # MIGRATION NOTE: v2's five startup hooks wrote the launcher script,
+      # the Playwright config, a workspace .mcp.json and a CLAUDE.md section
+      # on every boot — the last two into the user's repository. The scripts
+      # are layers now, the instructions are agent-context below, and MCP
+      # registration goes to each agent's user-level config instead of the
+      # workspace.
+      install:
+        - command: ["/opt/sbx-chromium/bin/sbx-browser-register"]
+          user: agent
+          description: Register the chrome-devtools MCP server with each installed agent
+      startup:
+        # Fallback for a create where an agent's own hook rewrote its config
+        # after ours ran. Writes nothing when the entry is already there, so
+        # re-running at every boot is free.
+        - command: ["/opt/sbx-chromium/bin/sbx-browser-register", "--quiet"]
+          user: agent
+          description: Re-register the chrome-devtools MCP server if an agent config lost it
+        # The window, when there is a display to put it on. Without
+        # --display this does nothing, and the MCP server starts a headless
+        # browser the first time an agent needs one. The socket variables are
+        # declared because hook environments are deny-by-default;
+        # display.sh also finds the socket where sbx mounts it.
+        - command: ["/opt/sbx-chromium/bin/sbx-chrome", "--if-display"]
+          user: agent
+          background: true
+          env: [WAYLAND_DISPLAY, DISPLAY, XDG_RUNTIME_DIR]
+          description: Open Chromium on the forwarded display
+
+  # MIGRATION NOTE: v2's agentContext block, moved to a staged file and
+  # rewritten for the single-browser setup. A mixin states no `filename`:
+  # the agent kit decides which memory file the body lands in.
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      contentFile: ./chromium-display-context.md

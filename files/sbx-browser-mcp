@@ -1,0 +1,24 @@
+#!/bin/sh
+# sbx-browser-mcp — the chrome-devtools MCP server (stdio), attached to the
+# shared browser from sbx-chrome, with the WebMCP tools enabled.
+#
+# Registered in each agent's MCP config by sbx-browser-register. It starts the
+# browser if nothing is listening yet, so the tools work with or without
+# --display and after the user closes the window. Nothing but the MCP stream
+# may reach stdout.
+set -eu
+PREFIX=@PREFIX@
+port="${CHROME_REMOTE_DEBUGGING_PORT:-9222}"
+
+"$PREFIX/bin/sbx-chrome" start </dev/null >&2 \
+  || echo "sbx-browser-mcp: continuing without a browser; tools will fail until 'sbx-chrome' succeeds" >&2
+
+export CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1
+export CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=1
+export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$PREFIX/node/bin/node" "$PREFIX/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js" \
+  --browserUrl "http://127.0.0.1:$port" \
+  --categoryExperimentalWebmcp=true \
+  --usageStatistics=false \
+  --performanceCrux=false \
+  "$@"

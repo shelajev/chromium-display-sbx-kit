@@ -1,0 +1,57 @@
+#!/bin/sh
+# sbx-chromium — the kit's Chromium, with its private libraries and fonts.
+#
+# A plain browser command: no profile management, no remote debugging. Use it
+# for one-shot headless work (`chromium --headless --screenshot=out.png URL`,
+# `--dump-dom`, `--print-to-pdf`). `sbx-chrome` builds the shared,
+# debuggable browser on top of it.
+set -eu
+PREFIX=@PREFIX@
+. "$PREFIX/libexec/display.sh"
+sbx_detect_display
+
+export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export FONTCONFIG_FILE="$PREFIX/etc/fonts/fonts.conf"
+export XKB_CONFIG_ROOT="$PREFIX/share/X11/xkb"
+export CHROME_WRAPPER="$0"
+
+# Go direct and let the sandbox's transparent proxy carry the traffic: the
+# forward proxy re-signs TLS with its own CA, which Chromium's root store does
+# not trust. Network policy still applies on the transparent path.
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+
+# Chromium honours only the last --enable-features, so a caller's list is
+# merged with ours instead of silently dropping WebMCP.
+features=WebMCP
+headless=0
+for arg in "$@"; do
+  case "$arg" in
+    --enable-features=*) features="$features,${arg#--enable-features=}" ;;
+    --headless|--headless=*) headless=1 ;;
+  esac
+done
+for arg in "$@"; do
+  shift
+  case "$arg" in
+    --enable-features=*) ;;
+    *) set -- "$@" "$arg" ;;
+  esac
+done
+
+if [ "$headless" = 1 ] || [ "$SBX_OZONE" = headless ]; then
+  [ "$headless" = 1 ] || set -- --headless "$@"
+  set -- --ozone-platform=headless "$@"
+else
+  # No GPU is forwarded; software compositing is what works on the display.
+  set -- --ozone-platform="$SBX_OZONE" --disable-gpu --disable-gpu-compositing "$@"
+fi
+
+exec "$PREFIX/chromium/chromium" \
+  --no-sandbox \
+  --disable-dev-shm-usage \
+  --no-first-run \
+  --no-default-browser-check \
+  --password-store=basic \
+  --no-proxy-server \
+  --enable-features="$features" \
+  "$@"

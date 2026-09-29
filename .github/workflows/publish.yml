@@ -1,0 +1,67 @@
+name: Publish Kit v3
+
+# Publishing is release-only: push any v-prefixed version tag (v2.0.1,
+# v2.1.0-rc1). The tag IS the version: it is passed to the descriptor as the
+# kitVersion arg, so the image tag and the version inside the image always
+# agree. Pre-release tags (with a '-') do not move :latest. Pull requests
+# cannot start this workflow and never receive the Docker Hub credential.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # The arm64 half builds and smoke-tests Chromium under QEMU, which is slow.
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Version from tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          # The descriptor's arg pattern rejects this too, but only after the
+          # runner has set up; fail in a second instead.
+          echo "$version" | grep -Eq '^[0-9]+(\.[0-9A-Za-z-]+)*$' \
+            || { echo "tag $RELEASE_TAG is not v<version>"; exit 1; }
+          tags="docker.io/${{ vars.DOCKERHUB_USERNAME }}/sbx-chromium-display:$version"
+          case "$version" in
+            *-*) ;;
+            *) tags="$tags,docker.io/${{ vars.DOCKERHUB_USERNAME }}/sbx-chromium-display:latest" ;;
+          esac
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "TAGS=$tags" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Both platforms in one invocation, so one index carries both and a tag
+      # never serves only the architecture that happened to build last.
+      - name: Publish mixin
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: chromium-display.yaml
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: kitVersion=${{ env.VERSION }}
+          tags: ${{ env.TAGS }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

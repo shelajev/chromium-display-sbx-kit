@@ -1,0 +1,10 @@
+#!/bin/sh
+# sbx-browser-register — add the chrome-devtools MCP server to every agent in
+# this sandbox that is installed, in that agent's own user-level config.
+#
+# Runs as a lifecycle hook at create and again at every boot; both are
+# idempotent, and an entry the user changed is left alone. Safe to run by hand.
+set -eu
+PREFIX=@PREFIX@
+LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+  exec "$PREFIX/node/bin/node" "$PREFIX/libexec/register.mjs" "$PREFIX/bin/sbx-browser-mcp" "$@"

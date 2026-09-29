@@ -1,0 +1,10 @@
+# The build context is this directory; only the recipe's inputs are needed.
+README.md
+run.sh
+LICENSE
+.git
+*.tar
+*.zip
+.DS_Store
+.github
+.gitignore

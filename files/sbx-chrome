@@ -1,0 +1,110 @@
+#!/bin/sh
+# sbx-chrome — the sandbox's shared, debuggable Chromium.
+#
+#   sbx-chrome [start] [URL]   start it if it is not running (headed when the
+#                              sandbox has a display, headless otherwise);
+#                              with a URL, open it in a new tab
+#   sbx-chrome stop | restart | status
+#
+# One browser per sandbox, on 127.0.0.1:$CHROME_REMOTE_DEBUGGING_PORT (9222).
+# The chrome-devtools MCP server attaches to it, and when the sandbox runs
+# with --display the same window is on your desktop, so you and the agent
+# drive one browser.
+set -eu
+PREFIX=@PREFIX@
+port="${CHROME_REMOTE_DEBUGGING_PORT:-9222}"
+profile="${CHROME_USER_DATA_DIR:-$HOME/.config/sbx-chromium/profile}"
+state="${XDG_STATE_HOME:-$HOME/.local/state}/sbx-chromium"
+log="$state/chrome.log"
+cdp="http://127.0.0.1:$port"
+
+probe() { curl -fsS --noproxy '*' --max-time 2 "$cdp/json/version" 2>/dev/null; }
+
+# Readiness: Chromium prints this line to stderr once DevTools is listening.
+# The log is rewritten on every launch, so an old line cannot answer for it,
+# and it needs no curl.
+listening() { grep -q '^DevTools listening on ' "$log" 2>/dev/null; }
+
+open_url() {
+  [ -n "${1:-}" ] || return 0
+  curl -fsS --noproxy '*' --max-time 5 -X PUT "$cdp/json/new?$1" >/dev/null
+}
+
+start() {
+  if probe >/dev/null || [ -n "$(browser_pids)" ]; then
+    open_url "${1:-}"
+    return 0
+  fi
+  mkdir -p "$profile" "$state"
+  # A profile left behind by a previous container holds a lock naming the old
+  # hostname, and Chromium refuses to start on it.
+  rm -f "$profile"/Singleton*
+  . "$PREFIX/libexec/display.sh"
+  sbx_detect_display
+  # Detached from the caller: this is often started by an MCP server or a
+  # hook, and the browser must outlive both.
+  launcher=""
+  command -v setsid >/dev/null 2>&1 && launcher=setsid
+  $launcher "$PREFIX/bin/sbx-chromium" \
+    --user-data-dir="$profile" \
+    --remote-debugging-address=127.0.0.1 \
+    --remote-debugging-port="$port" \
+    "${1:-about:blank}" </dev/null >"$log" 2>&1 &
+  # Half-second ticks; SBX_CHROME_START_TIMEOUT (seconds) is raised by the
+  # build's smoke test, which may run under emulation.
+  i=0
+  ticks=$(( ${SBX_CHROME_START_TIMEOUT:-30} * 2 ))
+  while [ $i -lt $ticks ]; do
+    if listening || probe >/dev/null; then
+      echo "sbx-chrome: Chromium ($SBX_OZONE) ready at $cdp" >&2
+      return 0
+    fi
+    sleep 0.5
+    i=$((i + 1))
+  done
+  echo "sbx-chrome: Chromium did not come up on $cdp; last lines of $log:" >&2
+  tail -n 20 "$log" >&2 || true
+  return 1
+}
+
+# The browser process for this port: the one whose command line names the port
+# and is not a --type= child. Read from /proc, since minimal bases lack pkill,
+# and a pid file would name setsid, which may fork.
+browser_pids() {
+  for dir in /proc/[0-9]*; do
+    # Processes can exit mid-scan; a vanished one is simply not ours.
+    cmdline="$(tr '\0' ' ' 2>/dev/null < "$dir/cmdline")" || continue
+    case "$cmdline" in
+      *--type=*) ;;
+      *"/chromium/chromium "*"--remote-debugging-port=$port"*) echo "${dir#/proc/}" ;;
+    esac
+  done
+}
+
+stop() {
+  pids="$(browser_pids)"
+  [ -n "$pids" ] || return 0
+  kill $pids 2>/dev/null || true
+  i=0
+  while [ -n "$(browser_pids)" ] && [ $i -lt 40 ]; do sleep 0.25; i=$((i + 1)); done
+}
+
+cmd="${1:-start}"
+case "$cmd" in
+  start) shift 2>/dev/null || true; start "${1:-}" ;;
+  stop) stop ;;
+  restart) stop; start "${2:-}" ;;
+  status)
+    if v="$(probe)"; then printf '%s\n' "$v"
+    elif [ -n "$(browser_pids)" ]; then echo "sbx-chrome: running on $cdp"
+    else echo "sbx-chrome: not running" >&2; exit 1; fi ;;
+  # Start only when there is a display to show it on. Used at sandbox boot:
+  # a headless browser nobody asked for is just memory, and the MCP server
+  # starts one on demand anyway.
+  --if-display)
+    . "$PREFIX/libexec/display.sh"
+    sbx_detect_display
+    [ "$SBX_OZONE" = headless ] || start ;;
+  -h|--help) sed -n '2,12p' "$0" ;;
+  *) start "$cmd" ;;
+esac
