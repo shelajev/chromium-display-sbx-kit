@@ -186,8 +186,9 @@ sbx run docker.io/docker/sbx-kit-claude:latest --display \
 - `.github/workflows/validate.yml` runs on every push to `main`: it builds the
   kit (which runs the smoke test), checks it with `kit-tck`, and audits file
   ownership.
-- `.github/workflows/publish.yml` runs on any `v<version>` tag and pushes
-  `linux/amd64` + `linux/arm64` to
+- `.github/workflows/publish.yml` runs on any `v<version>` tag, builds
+  `linux/amd64` and `linux/arm64` each on a native runner (Chromium's smoke
+  test does not survive QEMU), and merges them into
   `docker.io/$DOCKERHUB_USERNAME/sbx-chromium-display:<version>`, plus
   `:latest` unless the tag is a pre-release (`v2.1.0-rc1`). The tag is passed
   into the descriptor as `kitVersion`, so it is also the version inside the

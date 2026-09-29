@@ -5,6 +5,12 @@ name: Publish Kit v3
 # kitVersion arg, so the image tag and the version inside the image always
 # agree. Pre-release tags (with a '-') do not move :latest. Pull requests
 # cannot start this workflow and never receive the Docker Hub credential.
+#
+# Each platform builds on its own native runner rather than under QEMU: the
+# recipe smoke-tests Chromium before it ships, and Chromium does not run
+# reliably under emulation (the arm64 half aborted in the GPU process). Each
+# job pushes its image by digest; the merge job then writes one index naming
+# both, so a tag never serves only one architecture.
 on:
   push:
     tags: ['v*']
@@ -12,11 +18,21 @@ on:
 permissions:
   contents: read
 
+env:
+  IMAGE: docker.io/${{ vars.DOCKERHUB_USERNAME }}/sbx-chromium-display
+
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    # The arm64 half builds and smoke-tests Chromium under QEMU, which is slow.
-    timeout-minutes: 120
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -30,16 +46,9 @@ jobs:
           # runner has set up; fail in a second instead.
           echo "$version" | grep -Eq '^[0-9]+(\.[0-9A-Za-z-]+)*$' \
             || { echo "tag $RELEASE_TAG is not v<version>"; exit 1; }
-          tags="docker.io/${{ vars.DOCKERHUB_USERNAME }}/sbx-chromium-display:$version"
-          case "$version" in
-            *-*) ;;
-            *) tags="$tags,docker.io/${{ vars.DOCKERHUB_USERNAME }}/sbx-chromium-display:latest" ;;
-          esac
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "TAGS=$tags" >> "$GITHUB_ENV"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -50,18 +59,85 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Both platforms in one invocation, so one index carries both and a tag
-      # never serves only the architecture that happened to build last.
-      - name: Publish mixin
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           file: chromium-display.yaml
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: ${{ matrix.platform }}
           build-args: kitVersion=${{ env.VERSION }}
-          tags: ${{ env.TAGS }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           sbom: true
           provenance: mode=max
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
+
+      - name: Record digest
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Tags from version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          tags="-t $IMAGE:$version"
+          case "$version" in
+            *-*) ;;
+            *) tags="$tags -t $IMAGE:latest" ;;
+          esac
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "TAGS=$tags" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # The index this writes carries no kit annotations of its own; the
+      # platform manifests do, and consumers fall back to them (SPEC-v3 §9.3).
+      # kit-tck below reports that as a warning and still judges it conforming.
+      - name: Create multi-arch tags
+        working-directory: /tmp/digests
+        run: |
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $TAGS $(printf "$IMAGE@sha256:%s " *)
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Validate the published kit
+        run: |
+          go install github.com/docker/sandbox-kit-spec/v3/cmd/kit-tck@v3.0.0-m.6
+          "$(go env GOPATH)/bin/kit-tck" validate "$IMAGE:$VERSION"
