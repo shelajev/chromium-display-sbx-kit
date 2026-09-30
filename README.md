@@ -25,7 +25,7 @@ sbx settings set feature.sandbox-display true
 Compose the kit onto an agent workload:
 
 ```bash
-sbx run docker.io/docker/sbx-kit-claude:latest --display \
+sbx run docker.io/docker/sbx-kit-claude:2.1.278 --display \
   --kit docker.io/olegselajev241/sbx-chromium-display:2.0.0 \
   --name claude-browser .
 ```
@@ -33,7 +33,7 @@ sbx run docker.io/docker/sbx-kit-claude:latest --display \
 Or with Codex (any v3 workload kit works):
 
 ```bash
-sbx run docker.io/docker/sbx-kit-codex:latest --display \
+sbx run docker.io/docker/sbx-kit-codex:0.157.0 --display \
   --kit docker.io/olegselajev241/sbx-chromium-display:2.0.0 \
   --name codex-browser .
 ```
@@ -174,7 +174,7 @@ Desktop must be running) and caches the result by source hash:
 
 ```bash
 cd ~/your-project
-sbx run docker.io/docker/sbx-kit-claude:latest --display \
+sbx run docker.io/docker/sbx-kit-claude:2.1.278 --display \
   --kit ~/path/to/chromium-display-sbx-kit \
   --name claude-browser .
 ```

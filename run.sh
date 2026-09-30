@@ -7,10 +7,10 @@ set -euo pipefail
 #   SBX_NAME      sandbox name (default: <agent>-browser)
 # Examples:
 #   ./run.sh .
-#   SBX_WORKLOAD=docker.io/docker/sbx-kit-codex:latest ./run.sh .
+#   SBX_WORKLOAD=docker.io/docker/sbx-kit-codex:0.157.0 ./run.sh .
 
 kit_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-workload="${SBX_WORKLOAD:-docker.io/docker/sbx-kit-claude:latest}"
+workload="${SBX_WORKLOAD:-docker.io/docker/sbx-kit-claude:2.1.278}"
 agent="$(basename "${workload%%:*}")"
 name="${SBX_NAME:-${agent#sbx-kit-}-browser}"
 workspace="${1:-.}"
