@@ -120,8 +120,8 @@ export async function maintain(options={}) {
         dates.push(r.headers['last-modified']);
       }
       if(dates.length!==2) {report.notes.push('Chromium '+v+': artifact missing on at least one architecture');continue;}
-      // One exact exception covers the pair, but both dates are checked.
-      const mature=dates.map(d=>eligible('chromium',v,d)).every(Boolean);
+      // Existing shipped pins need no renewed age exception; new pins check both dates.
+      const mature=v===current || dates.map(d=>eligible('chromium',v,d)).every(Boolean);
       if(mature) {selected=v;break;}
     }
     if(!selected) throw new Error('No eligible common Chromium replacement for '+current+(present?'':' (mirror disappearance)')+'. See cooldown maturity times; retry after seven days or manually dispatch urgent_security_allow=chromium=<exact-version-revision> with justification.');
@@ -141,7 +141,7 @@ export async function maintain(options={}) {
     const candidates=Object.keys(meta.versions).filter(v=>/^\d+\.\d+\.\d+$/.test(v) && semver(v,mcp)>=0).sort((a,b)=>semver(b,a));
     let mcpNext=null;
     for(const v of candidates) {
-      if(!eligible('devtoolsMcp',v,meta.time?.[v],false)) continue;
+      if(v!==mcp && !eligible('devtoolsMcp',v,meta.time?.[v],false)) continue;
       const m=meta.versions[v];
       if(!compatible(m)) {report.notes.push('MCP '+v+': incompatible dependencies, bin path, deprecation or Node engine '+m.engines?.node);continue;}
       const r=await request(m.dist.tarball,{method:'HEAD',missing:true});
@@ -162,7 +162,7 @@ export async function maintain(options={}) {
     let tckNext=null;
     for(const v of goVersions) {
       const info=await json(goUrl+'/'+v+'.info',{missing:true});if(!info) continue;
-      if(!eligible('kit-tck',v,info.Time)) continue;
+      if(v!==tck && !eligible('kit-tck',v,info.Time)) continue;
       const mod=(await request(goUrl+'/'+v+'.mod')).body.toString();
       const required=mod.match(/^go (\d+)\.(\d+)/m);
       if(!required) throw new Error('kit-tck missing Go directive');
@@ -206,7 +206,7 @@ export async function maintain(options={}) {
       if(!currentImage) report.notes.push('MIRROR DISAPPEARANCE: '+ref+'@'+old);
       const latest=await inspect(tag);
       if(!latest) throw new Error(ref+': tag disappeared');
-      const mature=latest.dates.map(d=>eligible(component,latest.digest,d)).every(Boolean);
+      const mature=latest.digest===old || latest.dates.map(d=>eligible(component,latest.digest,d)).every(Boolean);
       if(!mature && !currentImage) throw new Error(ref+': current digest vanished and replacement is in cooldown');
       if(mature) {change(component,old,latest.digest);replace('chromium-display.dockerfile',ref+'@'+old,ref+'@'+latest.digest);}
     }
@@ -225,16 +225,25 @@ export function markdown(r) {
 }
 if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const options={};
-  const flags={'--root':'root','--now':'now','--event-name':'eventName','--urgent-security-allow':'urgentSecurityAllow','--security-justification':'securityJustification','--json-out':'jsonOut','--summary-out':'summaryOut'};
+  const flags={'--debian-base':'debianBase','--npm-base':'npmBase','--go-base':'goBase','--docker-base':'dockerBase','--dhi-base':'dhiBase','--root':'root','--now':'now','--event-name':'eventName','--urgent-security-allow':'urgentSecurityAllow','--security-justification':'securityJustification','--json-out':'jsonOut','--summary-out':'summaryOut'};
+  let argumentError;
   for(let i=2;i<process.argv.length;i++) {
     const a=process.argv[i];
     if(a==='--apply') options.apply=true;
     else if(a==='--dry-run') options.dryRun=true;
-    else if(flags[a] && process.argv[i+1]) options[flags[a]]=process.argv[++i];
-    else throw new Error('unknown/missing option '+a);
+    // Empty optional strings are how schedule/default workflow inputs arrive.
+    else if(flags[a] && i+1<process.argv.length && !process.argv[i+1].startsWith('--')) options[flags[a]]=process.argv[++i];
+    else argumentError ||= 'unknown/missing option '+a;
   }
-  if(options.apply && options.dryRun) throw new Error('choose --apply or --dry-run');
-  const report=await maintain(options);
+  let report;
+  try {
+    if(argumentError) throw new Error(argumentError);
+    if(options.apply && options.dryRun) throw new Error('choose --apply or --dry-run');
+    report=await maintain(options);
+  } catch(e) {
+    // Preserve reports even for usage/setup failures before maintain's source checks.
+    report={outcome:'failure',now:new Date().toISOString(),changes:[],notes:[],exceptions:[],sources:[],error:e.message};
+  }
   if(options.jsonOut) fs.writeFileSync(options.jsonOut,JSON.stringify(report,null,2)+'\n');
   const summary=markdown(report);
   if(options.summaryOut) fs.writeFileSync(options.summaryOut,summary);

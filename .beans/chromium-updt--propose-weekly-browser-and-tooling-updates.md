@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-13T20:08:53Z
+updated_at: 2026-11-13T20:14:37Z
 ---
 
 Epic chromium-brow; order 7. Add weekly/manual maintenance that detects available
@@ -32,3 +32,7 @@ Implemented a bounded official-source pin updater with deterministic HTTP fixtur
 Guest verification: fixture suite, display/lifecycle suite, syntax, workflow guard, actionlint v1.7.12, Beans and diff checks passed. Full native arm64 guest OCI recipe smoke passed (closure, browser/CDP, MCP/WebMCP, persistence, ownership races, registration), kit-tck 19/19 and overlay owners 0/0. Relative ./rel-bin/kit-tck real install succeeded. Live read-only dry run proposed mature debian-base digest refresh and held younger MCP/Node releases; no pin updates applied to this commit.
 
 Host acceptance remains pending: actual GitHub settings/branch rules, pushes, dispatch and both hosted runners; native SBX/display behavior and publication are host-owned. No pushes, PRs, merges, settings or secrets were changed by crew. Exact-commit independent QC next.
+
+- [x] QC round 2: real CLI empty-input/report regressions and already-shipped young-pin retention
+
+Round 2 correction: CLI now accepts empty optional strings passed by normal schedule/manual workflow argv and writes failure reports for argument/setup errors. Spawned CLI fixtures exercise actual invocation shape with local official-source-format HTTP fixtures, including schedule/manual apply, default manual dry-run, no-change/failure reports and a manual urgent Chromium update followed by a schedule while still young. Existing current pins retain resolution/compatibility checks without requiring renewed age exceptions; all new-pin seven-day gates and exact manual exception restrictions remain. Live read-only workflow-shaped CLI passed with empty security inputs and produced JSON/Markdown; no pin changes applied. No runtime/build/architecture changes or repeated guest build; prior native evidence remains separately recorded.

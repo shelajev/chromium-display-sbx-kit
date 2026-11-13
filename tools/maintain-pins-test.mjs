@@ -6,8 +6,10 @@ import path from 'node:path';
 import http from 'node:http';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {execFileSync,spawnSync} from 'node:child_process';
+import {execFileSync,spawnSync,execFile} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import {promisify} from 'node:util';
+const exec=promisify(execFile);
 import {maintain,markdown,semver} from './maintain-pins.mjs';
 const repo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'maintenance-test-'));
@@ -84,6 +86,28 @@ async function run(config={},extra={}) {
   const report=await maintain({...options,root,...extra});
   return {root,before,report};
 }
+// Spawn the real entry point with exactly the workflow's mode/event/security/
+// report argument shape. Source URL flags only redirect traffic to local fixtures.
+async function cli(config={}, {mode='--apply',event='schedule',urgent='',justification='',extra=[],root}={}) {
+  root ||= setup(config);
+  const before=bytes(root);
+  const reports=fs.mkdtempSync(path.join(dir,'reports-'));
+  const args=[repo+'/tools/maintain-pins.mjs',mode,'--event-name',event,
+    '--urgent-security-allow',urgent,'--security-justification',justification,
+    '--json-out',reports+'/report.json','--summary-out',reports+'/report.md',
+    '--root',root,'--now',options.now];
+  for(const source of ['debian','npm','go','docker','dhi']) args.push('--'+source+'-base',base);
+  let result;
+  try {result={code:0,...await exec(process.execPath,[...args,...extra])};}
+  catch(e) {result={code:e.code,stdout:e.stdout,stderr:e.stderr};}
+  const report=JSON.parse(fs.readFileSync(reports+'/report.json','utf8'));
+  const summary=fs.readFileSync(reports+'/report.md','utf8');
+  assert.equal(result.code,report.outcome==='failure'?1:0,result.stderr || summary);
+  assert.match(summary,new RegExp('Weekly maintenance: '+report.outcome));
+  assert.equal(result.stdout,summary+'\n');
+  assert.equal(result.stderr,'','CLI reports a clean failure without uncaught stacks');
+  return {root,before,report,summary};
+}
 try {
   assert.equal(semver('v3.0.0-m.12','v3.0.0-m.9'),1);
   assert.equal(semver('v3.0.0','v3.0.0-m.13'),1);
@@ -144,6 +168,63 @@ try {
   const root=setup(),before=bytes(root);
   const fail=await maintain({...options,root,npmBase:base+'/broken',apply:true});
   assert.equal(fail.outcome,'failure');assert.match(fail.error,/HTTP 404/);assert.deepEqual(bytes(root),before);
+  // Normal schedule apply and default manual dry-run both pass empty inputs.
+  let spawned=await cli();
+  assert.equal(spawned.report.outcome,'update');
+  assert.equal(spawned.report.changes.length,6);
+  assert.notDeepEqual(bytes(spawned.root),spawned.before);
+  spawned=await cli({}, {event:'workflow_dispatch'});
+  assert.equal(spawned.report.outcome,'update','manual apply accepts empty optional inputs');
+  assert.equal(spawned.report.changes.length,6);
+  assert.notDeepEqual(bytes(spawned.root),spawned.before);
+  for(const config of [{},{young:true}]) {
+    spawned=await cli(config,{mode:'--dry-run',event:'workflow_dispatch'});
+    assert.equal(spawned.report.outcome,config.young?'no-change':'update');
+    assert.deepEqual(bytes(spawned.root),spawned.before,'manual dry-run never applies');
+  }
+  spawned=await cli({young:true});
+  assert.equal(spawned.report.outcome,'no-change');
+  assert.deepEqual(bytes(spawned.root),spawned.before);
+  for(const invocation of [{event:'schedule'},{event:'workflow_dispatch'},{event:'workflow_dispatch',mode:'--dry-run'}]) {
+    spawned=await cli({vanished:true,young:true},invocation);
+    assert.equal(spawned.report.outcome,'failure');
+    assert.match(spawned.summary,/mirror disappearance/);
+    assert.match(spawned.summary,/matures 2026-11-19/);
+    assert.deepEqual(bytes(spawned.root),spawned.before,'CLI source/policy failure applies nothing');
+  }
+  // CLI/setup failures also leave useful JSON and Markdown rather than a stack.
+  for(const extra of [['--unknown-option'],['--now'],['--now','invalid'],['--root',dir+'/absent']]) {
+    spawned=await cli({}, {extra});
+    assert.equal(spawned.report.outcome,'failure');
+    assert.match(spawned.summary,/Failure:/);
+    assert.deepEqual(bytes(spawned.root),spawned.before);
+  }
+  // Apply a real exact manual Chromium exception, then schedule again while
+  // it is still young. No renewed exception is needed for the current pin.
+  spawned=await cli({vanished:true,young:true},{event:'workflow_dispatch',urgent:'chromium='+nextChrome,justification:'DSA fixture: urgent fix'});
+  assert.equal(spawned.report.outcome,'update');
+  assert.ok(spawned.report.exceptions.length);
+  const afterException=await cli({}, {root:spawned.root});
+  assert.equal(afterException.report.outcome,'no-change',afterException.summary);
+  assert.deepEqual(bytes(afterException.root),afterException.before);
+  assert.equal(afterException.report.exceptions.length,0);
+  // The same current-pin retention applies to tooling; npm new-pin age
+  // exceptions remain forbidden (covered below through the real CLI).
+  const currentTooling=setup({young:true});
+  fs.writeFileSync(currentTooling+'/chromium-display.yaml',fs.readFileSync(currentTooling+'/chromium-display.yaml','utf8').replace('default: "1.12.0"','default: "1.13.0"'));
+  fs.writeFileSync(currentTooling+'/tools/install-kit-tck.sh',fs.readFileSync(currentTooling+'/tools/install-kit-tck.sh','utf8').replace('version=v3.0.0-m.12','version=v3.0.0-m.13'));
+  spawned=await cli({}, {root:currentTooling});
+  assert.equal(spawned.report.outcome,'no-change',spawned.summary);
+  assert.deepEqual(bytes(spawned.root),spawned.before);
+  for(const security of [
+    {event:'schedule',urgent:'chromium='+nextChrome,justification:'DSA'},
+    {event:'workflow_dispatch',urgent:'chromium='+nextChrome},
+    {event:'workflow_dispatch',urgent:'devtoolsMcp=1.13.0',justification:'DSA'},
+  ]) {
+    spawned=await cli({young:true},security);
+    assert.equal(spawned.report.outcome,'failure');
+    assert.deepEqual(bytes(spawned.root),spawned.before);
+  }
   // Workflow guards use real files and reject each prohibited convention.
   for(const body of [
     'on:\n  pull_request:\njobs:\n',
@@ -174,7 +255,7 @@ esac
     const expected=out==='existing-dir'?cwd+'/existing-dir/kit-tck':path.resolve(cwd,out);
     assert.equal(fs.readFileSync(expected,'utf8'),'fixture');
   }
-  console.log('maintenance: dry-run/no-change/update/failure, policy, workflow guards and relative installer fixtures passed');
+  console.log('maintenance: imported and spawned-CLI dry-run/no-change/update/failure, current-pin retention, policy, workflow guards and relative installer fixtures passed');
 } finally {
   await new Promise(r=>server.close(r));fs.rmSync(dir,{recursive:true,force:true});
 }
