@@ -34,7 +34,7 @@ ARG PREFIX=/opt/sbx-chromium
 # Upstream Debian rather than DHI's debian-base: DHI rebuilds the toolchain
 # packages (gcc-14-base …+dhi3) and upstream chromium's dependency chain pins
 # the non-DHI versions, so apt refuses to resolve it there.
-FROM debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c AS chromium
+FROM debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6 AS chromium
 ARG PREFIX
 ARG CHROMIUM_VERSION
 ARG CHROMIUM_DEBIAN_REVISION
@@ -131,9 +131,11 @@ EOF
 FROM dhi.io/node:24-debian13-dev@sha256:1be7f2a3312898e33b59d511b047b033eaf38ecc6fd5d27d9f95ca0fcf1ca2c9 AS mcp
 ARG PREFIX
 ARG DEVTOOLS_MCP_VERSION
+ENV NPM_CONFIG_MIN_RELEASE_AGE=7
 RUN --mount=type=secret,id=proxy-ca,required=false,mode=0444 <<'EOF'
 set -eu
 if [ -s /run/secrets/proxy-ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/proxy-ca; fi
+test "$(npm config get min-release-age)" = 7
 install -d "$PREFIX/node/bin" /tmp/pack
 cp -L "$(command -v node)" "$PREFIX/node/bin/node"
 # npm unpacks it (this image has no gzip); --ignore-scripts because nothing
@@ -157,7 +159,7 @@ ARG DEVTOOLS_MCP_VERSION
 COPY --from=chromium $PREFIX $PREFIX
 COPY --from=mcp $PREFIX $PREFIX
 COPY --chmod=0755 files/sbx-chromium files/sbx-chrome files/sbx-browser-mcp files/sbx-browser-register $PREFIX/bin/
-COPY files/register.mjs files/display.sh $PREFIX/libexec/
+COPY files/register.mjs files/display.sh files/wayland-probe.mjs files/lifecycle.mjs $PREFIX/libexec/
 COPY files/test /tmp/test
 RUN <<'EOF'
 set -eu

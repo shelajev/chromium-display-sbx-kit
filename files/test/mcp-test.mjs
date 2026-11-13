@@ -1,21 +1,30 @@
 // Drives sbx-browser-mcp over stdio the way an agent does: initialize, list
 // tools, open a page that registers a WebMCP tool, find it, call it.
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import {promisify} from 'node:util';
+import path from 'node:path';
+const exec = promisify(execFile);
+const chrome = path.join(path.dirname(process.argv[2]), 'sbx-chrome');
 import http from 'node:http';
 
-// Chromium 154 exposes the API as document.modelContext; the draft spec says
+// Chromium versions may expose the API as document.modelContext; the draft spec says
 // navigator.modelContext. Either works for the test.
 const page = `<!doctype html><title>webmcp</title><script>
+if (location.pathname === '/seed') localStorage.setItem('sbx_test', 'retained');
 (navigator.modelContext || document.modelContext).registerTool({
   name: 'add',
   description: 'Adds two numbers',
   inputSchema: { type: 'object', properties: { a: { type: 'number' }, b: { type: 'number' } }, required: ['a', 'b'] },
   execute: async ({ a, b }) => ({ content: [{ type: 'text', text: 'sum=' + (a + b) }] }),
 });
+(navigator.modelContext || document.modelContext).registerTool({
+ name: 'saved_state', description: 'Checks synthetic test persistence', inputSchema: {type: 'object', properties: {}},
+ execute: async () => ({content: [{type: 'text', text: 'cookie=' + document.cookie.includes('sbx_login=retained') + ' storage=' + (localStorage.getItem('sbx_test') === 'retained')}]})
+});
 </script><p>WebMCP test page</p>`;
-const server = http.createServer((_, res) => { res.setHeader('content-type', 'text/html'); res.end(page); });
+const server = http.createServer((req, res) => { res.setHeader('content-type', 'text/html'); if (req.url === '/seed') res.setHeader('Set-Cookie', 'sbx_login=retained; Max-Age=3600; Path=/'); res.end(page); });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
-const url = `http://127.0.0.1:${server.address().port}/`;
+const url = `http://127.0.0.1:${server.address().port}/seed`;
 
 const mcp = spawn(process.argv[2], [], { stdio: ['pipe', 'pipe', 'inherit'] });
 let buf = '', id = 0;
@@ -63,8 +72,35 @@ try {
   if (!listed.includes('add')) throw new Error(`list_webmcp_tools:\n${listed}`);
   const out = await call('execute_webmcp_tool', { pageId, toolName: 'add', input: JSON.stringify({ a: 2, b: 3 }) });
   if (!out.includes('sum=5')) throw new Error(`execute_webmcp_tool:\n${out}`);
+  const seeded = await call('execute_webmcp_tool', {pageId, toolName:'saved_state', input:'{}'});
+  if (!seeded.includes('cookie=true storage=true')) throw new Error('synthetic state was not seeded');
   console.log('webmcp: ok');
+  await Promise.all(Array.from({length: 4}, (_, i) => exec(chrome, i % 2 ? [url + '?q=hello%20world#marker'] : ['start'])));
+  if (!(await call('list_pages')).includes('?q=hello%20world#marker')) throw new Error('open tab lost URL escapes or fragment');
+  const before = JSON.parse((await exec(chrome, ['diag'])).stdout);
+  if (before.pids.length !== 1) throw new Error('concurrent start created duplicate browsers');
+  // A real Chromium owns this profile; changing the CDP port must neither
+  // delete its SingletonLock nor terminate it.
+  let refused = false;
+  try { await exec(chrome, ['start'], {env: {...process.env, CHROME_REMOTE_DEBUGGING_PORT: '19397'}}); }
+  catch (e) { refused = /live owner/.test(e.stderr); }
+  if (!refused || !JSON.parse((await exec(chrome, ['diag'])).stdout).running) throw new Error('live profile owner was not protected');
+  await exec(chrome, ['restart', url.replace('/seed','/verify')]);
+  // Keep this MCP stdio process open: the next tool must reconnect itself.
+  const afterPages = await call('list_pages');
+  const afterId = Number((afterPages.match(/^\D*(\d+):/m) || [])[1]);
+  if (!Number.isInteger(afterId)) throw new Error('no page after restart');
+  await call('navigate_page', {pageId: afterId, type: 'url', url: url.replace('/seed','/verify')});
+  if (!(await call('take_snapshot', {pageId: afterId})).includes('WebMCP test page')) throw new Error('snapshot after restart failed');
+  const saved = await call('execute_webmcp_tool', {pageId: afterId, toolName: 'saved_state', input: '{}'});
+  if (!saved.includes('cookie=true storage=true')) throw new Error('profile did not persist: '+saved);
+  const again = await call('execute_webmcp_tool', {pageId: afterId, toolName: 'add', input: JSON.stringify({a:2,b:3})});
+  if (!again.includes('sum=5')) throw new Error('WebMCP after restart failed');
+  const after = JSON.parse((await exec(chrome, ['diag'])).stdout);
+  if (after.pids.length !== 1 || after.pids[0] === before.pids[0]) throw new Error('restart did not replace the single browser');
+  console.log('restart, MCP reattach, cookie/localStorage persistence: ok');
 } finally {
   mcp.kill();
+  server.closeAllConnections();
   server.close();
 }

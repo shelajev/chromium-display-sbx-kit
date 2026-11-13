@@ -58,7 +58,7 @@ args:
     # descriptor; the recipe itself never reads it.
     buildArg: KIT_VERSION
   chromium:
-    default: "154.0.8037.57"
+    default: "156.0.8078.79"
     pattern: '^[0-9]+(\.[0-9]+){3}$'
     description: Debian trixie chromium upstream version (must be >= 150 for WebMCP)
     buildArg: CHROMIUM_VERSION
@@ -71,7 +71,7 @@ args:
     description: Debian revision of the chromium package
     buildArg: CHROMIUM_DEBIAN_REVISION
   devtoolsMcp:
-    default: "1.10.1"
+    default: "1.12.0"
     pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
     description: chrome-devtools-mcp release to bundle
     buildArg: DEVTOOLS_MCP_VERSION
@@ -137,7 +137,7 @@ capabilities:
         - command: ["/opt/sbx-chromium/bin/sbx-chrome", "--if-display"]
           user: agent
           background: true
-          env: [WAYLAND_DISPLAY, DISPLAY, XDG_RUNTIME_DIR]
+          env: [WAYLAND_DISPLAY, DISPLAY, XDG_RUNTIME_DIR, SBX_WAYLAND_SOCKET, SBX_CHROME_HEADLESS]
           description: Open Chromium on the forwarded display
 
   # MIGRATION NOTE: v2's agentContext block, moved to a staged file and

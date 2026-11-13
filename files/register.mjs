@@ -94,7 +94,7 @@ const agents = [
     run: () => {
       const file = path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'config.toml');
       const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-      if (/^\[mcp_servers\.(chrome-devtools|"chrome-devtools")\]/m.test(text)) return 'already registered';
+      if (/^\[mcp_servers\.(chrome-devtools|"chrome-devtools"|'chrome-devtools')\]/m.test(text)) return 'already registered';
       const block = `\n[mcp_servers.${NAME}]\ncommand = ${JSON.stringify(command)}\nstartup_timeout_sec = 30\n`;
       writeAtomic(file, text + (text && !text.endsWith('\n') ? '\n' : '') + block);
       return `registered in ${file}`;
