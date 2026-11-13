@@ -5,19 +5,40 @@ name: Validate Kit v3
 # trip, agent registration) — and judges the artifact with kit-tck.
 on:
   push:
-    branches: [main]
+    branches: [main, automation/weekly-maintenance]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      maintenance:
+        type: boolean
+        default: false
+      revision:
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: Download proposed pins
+        if: inputs.maintenance == true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: maintenance-pins
+          path: .
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -58,6 +79,8 @@ jobs:
       - name: Check script syntax
         run: |
           python3 tools/check-workflows.py
+          node tools/maintain-pins-test.mjs
+          node files/test/display-lifecycle-test.mjs
           bash -n run.sh
           for f in files/sbx-* files/display.sh files/test/*.sh tools/*.sh; do sh -n "$f"; done
           for f in files/*.mjs files/test/*.mjs tools/*.mjs; do node --check "$f"; done

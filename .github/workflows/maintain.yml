@@ -1,0 +1,171 @@
+name: Weekly pin maintenance
+
+on:
+  schedule:
+    - cron: '17 8 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report only; do not push or open a PR
+        type: boolean
+        default: true
+      urgent_security_allow:
+        description: Comma-separated exact component=pin targets younger than seven days
+        type: string
+        default: ''
+      security_justification:
+        description: Security advisory and reason for the age exception
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-pin-maintenance
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    # Maintenance runs trusted default-branch code, never a proposed branch.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      outcome: ${{ steps.detect.outputs.outcome }}
+      base: ${{ steps.detect.outputs.base }}
+      dry_run: ${{ steps.detect.outputs.dry_run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - name: Detect compatible mature updates
+        id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          URGENT: ${{ inputs.urgent_security_allow }}
+          JUSTIFICATION: ${{ inputs.security_justification }}
+        run: |
+          mode=--apply
+          if [ "$DRY_RUN" = true ]; then mode=--dry-run; fi
+          echo "dry_run=${DRY_RUN:-false}" >> "$GITHUB_OUTPUT"
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          mkdir -p /tmp/maintenance-report
+          node tools/maintain-pins.mjs "$mode" --event-name "$EVENT" \
+            --urgent-security-allow "$URGENT" --security-justification "$JUSTIFICATION" \
+            --json-out /tmp/maintenance-report/report.json \
+            --summary-out /tmp/maintenance-report/report.md
+          echo "outcome=$(node -p 'JSON.parse(require("fs").readFileSync("/tmp/maintenance-report/report.json")).outcome')" >> "$GITHUB_OUTPUT"
+      - name: Publish diagnostic summary
+        if: always()
+        run: |
+          if [ -f /tmp/maintenance-report/report.md ]; then
+            cat /tmp/maintenance-report/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Maintenance failed before a report was produced; inspect the job log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Save report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: maintenance-report
+          path: /tmp/maintenance-report/
+          if-no-files-found: warn
+      - name: Save proposed pins
+        if: steps.detect.outputs.outcome == 'update' && steps.detect.outputs.dry_run != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: maintenance-pins
+          path: |
+            chromium-display.yaml
+            chromium-display.dockerfile
+            tools/install-kit-tck.sh
+
+  validate:
+    needs: detect
+    if: needs.detect.outputs.outcome == 'update' && needs.detect.outputs.dry_run != 'true'
+    uses: ./.github/workflows/validate.yml
+    with:
+      maintenance: true
+      revision: ${{ needs.detect.outputs.base }}
+
+  propose:
+    needs: [detect, validate]
+    if: >-
+      always() && needs.detect.result == 'success' &&
+      needs.detect.outputs.dry_run != 'true' &&
+      (needs.detect.outputs.outcome == 'no-change' || needs.validate.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.detect.outputs.base }}
+          fetch-depth: 0
+      - name: Download proposed pins
+        if: needs.detect.outputs.outcome == 'update'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: maintenance-pins
+          path: .
+      - name: Download maintenance report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: maintenance-report
+          path: /tmp/maintenance-report
+      - name: Maintain one update PR and dispatch branch CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ needs.detect.outputs.outcome }}
+          BASE: ${{ needs.detect.outputs.base }}
+        run: |
+          set -eu
+          branch=automation/weekly-maintenance
+          # Do not publish a candidate against a base changed during validation.
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$BASE" || {
+            echo "main changed during maintenance; rerun from main." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          pr=$(gh pr list --base main --head "$branch" --state open --json number --jq '.[0].number // empty')
+          if [ "$OUTCOME" = no-change ]; then
+            if [ -n "$pr" ]; then gh pr close "$pr"; fi
+            echo "No eligible pin changes." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add chromium-display.yaml chromium-display.dockerfile tools/install-kit-tck.sh
+          git commit -m "chore: refresh mature browser and tooling pins"
+          # Fixed bot branch only; lease prevents overwriting concurrent edits.
+          remote=$(git ls-remote origin "refs/heads/$branch" | cut -f1)
+          same=false
+          if [ -n "$remote" ]; then
+            git fetch origin "$branch"
+            if [ "$(git rev-parse HEAD^{tree})" = "$(git rev-parse FETCH_HEAD^{tree})" ]; then same=true; fi
+          fi
+          if [ "$same" != true ]; then
+            git push --force-with-lease="refs/heads/$branch:$remote" origin "HEAD:refs/heads/$branch"
+          fi
+          {
+            cat /tmp/maintenance-report/report.md
+            printf '\nNative amd64 + arm64 recipe smoke tests and kit-tck passed before proposal.\n'
+            printf '\nValidation run: %s/%s/actions/runs/%s\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf '\nReview and merge manually after proposed-branch CI.\n'
+          } > /tmp/maintenance-pr.md
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "Weekly browser and tooling maintenance" --body-file /tmp/maintenance-pr.md
+          else
+            gh pr create --base main --head "$branch" --title "Weekly browser and tooling maintenance" --body-file /tmp/maintenance-pr.md || {
+              echo "PR creation failed. Verify Settings > Actions > General > Allow GitHub Actions to create and approve pull requests, and organization policy." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            }
+          fi
+          # GITHUB_TOKEN pushes do not start push CI; dispatch is an exception.
+          gh workflow run validate.yml --ref "$branch"
+          echo "Maintained update PR; proposed-branch native CI dispatched. No automatic merge." >> "$GITHUB_STEP_SUMMARY"

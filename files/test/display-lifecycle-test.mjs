@@ -15,7 +15,7 @@ const prefix = path.join(dir, 'kit');
 for (const d of ['bin', 'libexec', 'node/bin', 'chromium']) fs.mkdirSync(`${prefix}/${d}`, {recursive: true});
 const installed = !!process.env.PREFIX;
 for (const f of ['display.sh', 'wayland-probe.mjs', 'lifecycle.mjs']) fs.copyFileSync(`${installed ? process.env.PREFIX+'/libexec' : source}/${f}`, `${prefix}/libexec/${f}`);
-for (const f of ['sbx-chrome', 'sbx-chromium']) fs.writeFileSync(`${prefix}/bin/${f}`, fs.readFileSync(`${installed ? process.env.PREFIX+'/bin' : source}/${f}`, 'utf8').replaceAll(installed ? process.env.PREFIX : '@PREFIX@', prefix), {mode: 0o755});
+for (const f of ['sbx-chrome', 'sbx-chromium', 'sbx-browser-mcp']) fs.writeFileSync(`${prefix}/bin/${f}`, fs.readFileSync(`${installed ? process.env.PREFIX+'/bin' : source}/${f}`, 'utf8').replaceAll(installed ? process.env.PREFIX : '@PREFIX@', prefix), {mode: 0o755});
 fs.symlinkSync(process.execPath, `${prefix}/node/bin/node`);
 // Fake browser only for safe failure paths and one-shot argument verification.
 fs.writeFileSync(`${prefix}/chromium/chromium`, '#!/bin/sh\nprintf "%s\\n" "$@"\nexit 1\n', {mode: 0o755});
@@ -50,6 +50,25 @@ async function chrome(args, extra={}) {
   catch(e) { return {code:e.code,stdout:e.stdout,stderr:e.stderr}; }
 }
 try {
+  for (const port of ['0','09222','0x2406','9222.0','9.222e3','+9222','-1',' 9222','65536','999999999999999999999','abc','9222/path']) {
+    for (const bin of ['sbx-chrome','sbx-browser-mcp']) {
+      await assert.rejects(exec(`${prefix}/bin/${bin}`, ['diag'], {env:{...env,CHROME_REMOTE_DEBUGGING_PORT:port}}), e =>
+        e.code === 1 && e.stdout === '' && /CHROME_REMOTE_DEBUGGING_PORT/.test(e.stderr));
+    }
+  }
+  for (const port of ['1','9222','65535','']) {
+    const r = await chrome(['diag'], {CHROME_REMOTE_DEBUGGING_PORT:port});
+    assert.equal(r.code,0); assert.equal(JSON.parse(r.stdout).port,Number(port || 9222));
+  }
+  const xenv={SBX_X11_UNIX_DIR:display,WAYLAND_DISPLAY:'',SBX_DISPLAY_RUNTIME_DIRS:dir+'/empty'};
+  for (const kind of ['absent','file','socket']) {
+    if (kind === 'file') fs.writeFileSync(display+'/X0','');
+    if (kind === 'socket') { fs.unlinkSync(display+'/X0'); await wayland(display+'/X0',null); }
+    for (const value of [':0',':0.0','unix:0','unix:0.0','unix/:0','unix/:0.0']) {
+      assert.equal((await detect({...xenv,DISPLAY:value})).stdout,kind === 'socket' ? 'x11:' : 'headless:',value);
+    }
+  }
+  assert.equal((await detect({...xenv,DISPLAY:'127.0.0.1:0'})).stdout,'x11:');
   await wayland(`${runtime}/wayland-0`, ['wl_seat','zwlr_data_control_manager_v1']);
   assert.equal((await detect()).stdout, 'headless:');
   assert.equal((await chrome(['--if-display'])).code, 0);
@@ -135,6 +154,15 @@ exec \"${process.execPath}\" \"$@\"
   const conflict=await chrome(['start'],{CHROME_REMOTE_DEBUGGING_PORT:String(listener.address().port)});
   assert.match(conflict.stderr,/occupied/);assert.equal(listener.listening,true);
   const diag=JSON.parse((await chrome(['diag'])).stdout);assert.equal(diag.singleton,'present');assert.equal(diag.cdpHealthy,false);assert.ok(diag.displayCandidates.length);
+  // Exercise valid MCP URL construction without starting a browser/server.
+  fs.writeFileSync(prefix+'/bin/sbx-chrome','#!/bin/sh\nexit 0\n',{mode:0o755});
+  const launcher=prefix+'/chrome-devtools-mcp/build/src/bin';fs.mkdirSync(launcher,{recursive:true});
+  fs.writeFileSync(launcher+'/chrome-devtools-mcp.js','console.log(JSON.stringify(process.argv.slice(2)))');
+  for (const port of ['1','9222','65535','']) {
+    const result=await exec(prefix+'/bin/sbx-browser-mcp',[],{env:{...env,CHROME_REMOTE_DEBUGGING_PORT:port}});
+    const args=JSON.parse(result.stdout);
+    assert.equal(args[args.indexOf('--browserUrl')+1],'http://127.0.0.1:'+(port || '9222'));
+  }
   console.log('display/lifecycle: ok');
 } finally {
   for(const server of servers) server.close();

@@ -9,6 +9,14 @@
 set -eu
 PREFIX=@PREFIX@
 port="${CHROME_REMOTE_DEBUGGING_PORT:-9222}"
+case "$port" in
+  ''|*[!0-9]*|0*) valid_port=0 ;;
+  *) valid_port=1 ;;
+esac
+if [ "$valid_port" = 0 ] || [ "${#port}" -gt 5 ] || [ "$port" -gt 65535 ]; then
+  echo 'invalid CHROME_REMOTE_DEBUGGING_PORT: expected decimal 1..65535 without leading zeros' >&2
+  exit 1
+fi
 
 "$PREFIX/bin/sbx-chrome" start </dev/null >&2
 

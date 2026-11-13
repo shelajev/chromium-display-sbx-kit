@@ -8,8 +8,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { discover } from './wayland-probe.mjs';
 const prefix = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const port = Number(process.env.CHROME_REMOTE_DEBUGGING_PORT || 9222);
-if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid CDP port');
+const portText = process.env.CHROME_REMOTE_DEBUGGING_PORT || '9222';
+if (!/^[1-9][0-9]{0,4}$/.test(portText) || Number(portText) > 65535) {
+  console.error('invalid CHROME_REMOTE_DEBUGGING_PORT: expected decimal 1..65535 without leading zeros');
+  process.exit(1);
+}
+const port = Number(portText);
 const profile = path.resolve(process.env.CHROME_USER_DATA_DIR || `${process.env.HOME}/.config/sbx-chromium/profile`);
 const state = path.resolve(process.env.XDG_STATE_HOME || `${process.env.HOME}/.local/state`, 'sbx-chromium');
 const endpoint = `http://127.0.0.1:${port}`;

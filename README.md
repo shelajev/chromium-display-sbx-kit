@@ -233,3 +233,92 @@ Chromium transitions the experimental API. See [candidate verification and host
 handoff](FOUNDATION-REPORT.md) for exact build/test commands and pending native
 host/human acceptance. Proxy routing, profile security, GPU validation, and
 release readiness remain subsequent work packages.
+## Weekly dependency maintenance
+
+After this workflow is merged to the default branch (`main`), **Weekly pin
+maintenance** runs every Monday at 08:17 UTC, or through `workflow_dispatch`.
+Scheduled runs propose updates; manual runs default to a report-only dry run.
+The report and JSON artifact distinguish `no-change`, `update` and `failure`.
+For a local read-only check (Node 24, curl, xz and dpkg required):
+
+```sh
+node tools/maintain-pins.mjs --dry-run
+```
+
+The tool reads Debian's trixie/security/updates package indices, the official
+npm registry, the Go module proxy, and Docker Hub/DHI OCI APIs. It updates
+Chromium and its Debian revision together, chrome-devtools-mcp, kit-tck, and
+the three pinned base/builder image digests. Both amd64 and arm64 must exist
+for shared Chromium and OCI pins. Debian versions use dpkg ordering; TCK
+milestones use semantic version ordering. MCP updates must retain the bundled
+launcher path, dependency-free packaging and a recognized Node 24-compatible
+engine range. A changed packaging contract is reported for human review.
+
+New pins must be at least seven days old. Debian uses the newer package
+Last-Modified time across the two architectures; npm uses registry release
+time; Go uses module proxy Time; OCI uses the newer platform config creation
+time. These are upstream metadata observations, not claims about a security
+advisory's publication date. A younger release is held with its exact maturity
+time. Current pins are checked for disappearance. A vanished Debian pin must
+have a mature common replacement or the run fails with recovery instructions;
+there is no silent age relaxation, downgrade or single-architecture fallback.
+An unreachable/invalid source also fails before any pin files are written.
+
+For an urgent security fix, manually dispatch from `main` with `dry_run=false`,
+`urgent_security_allow` set to comma-separated **exact** targets, such as
+`chromium=156.0.8078.90-1~deb13u2`, and a nonempty `security_justification`
+naming the advisory and reason. Supported component names are `chromium`,
+`devtoolsMcp`, `kit-tck`, `debian`, `debian-base`, and `node`; OCI targets use
+the full `sha256:…` digest. Exceptions are audited prominently in the report
+and PR and are rejected on schedules, without a reason, or when unused.
+MCP releases younger than seven days cannot be excepted: the recipe's
+`NPM_CONFIG_MIN_RELEASE_AGE=7` guard remains mandatory.
+
+An update is built on native `ubuntu-24.04` (amd64) and `ubuntu-24.04-arm`
+(arm64), running the recipe's browser/CDP/MCP/WebMCP smoke tests, kit-tck,
+ownership audit, script checks and regression fixtures. Only after both pass
+does the workflow replace the fixed `automation/weekly-maintenance` branch
+using a force-with-lease and create or refresh one PR to `main`. Identical
+trees avoid redundant pushes. If main changed while testing, proposal fails
+and requires a rerun. A no-change run closes an obsolete open maintenance PR.
+Failure reports remain available in the Actions summary/artifact. Review and
+merge remain manual; grouped weekly Dependabot Actions updates are preserved.
+
+GitHub prerequisites (owners verify these; this change does not alter settings):
+
+- Actions and the pinned public actions must be allowed by repository and
+  organization policy, with access to both native runner labels.
+- Under **Settings → Actions → General → Workflow permissions**, enable
+  **Allow GitHub Actions to create and approve pull requests** if permitted
+  by organization policy. The proposal job requests `contents: write`,
+  `pull-requests: write`, and `actions: write`; the other jobs use read access.
+  PR creation errors point to this setting. No PAT or new secret is needed.
+- Branch rules must permit the workflow identity to write the dedicated bot
+  branch and force-update it. Main protections remain in effect.
+- Both workflows must exist on the default branch before manual dispatch;
+  schedules run the default branch and may be delayed by GitHub. This
+  maintenance workflow intentionally accepts dispatch only from `main`.
+
+A push made with `GITHUB_TOKEN` does **not** trigger downstream push workflows.
+`workflow_dispatch` **is an exception** and can start a run using that token
+with Actions write permission. After maintaining the PR, the workflow explicitly
+dispatches `validate.yml` on the proposed branch, giving checks on the branch
+commit in addition to the pre-proposal artifact tests. A maintainer with write
+access can also run:
+
+```sh
+gh workflow run validate.yml --ref automation/weekly-maintenance
+```
+
+A human/App/PAT push to that branch can trigger its allowed push route.
+There are no PR-event Actions or automatic merges. Actual repository permissions,
+GitHub dispatch execution and native SBX behavior require host verification;
+local fixtures do not establish these.
+
+Official references: [GitHub workflow triggering and token exceptions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow),
+[manual dispatch and branch selection](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow),
+[repository Actions permissions](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository),
+[Debian version ordering](https://www.debian.org/doc/debian-policy/ch-controlfields.html#version),
+[npm metadata](https://registry.npmjs.org/chrome-devtools-mcp),
+[Go proxy protocol](https://go.dev/ref/mod#goproxy-protocol), and
+[OCI image index platforms](https://github.com/opencontainers/image-spec/blob/main/image-index.md).

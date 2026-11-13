@@ -29,7 +29,12 @@ sbx_detect_display() {
   unset WAYLAND_DISPLAY
   if [ -n "${DISPLAY:-}" ]; then
     case "$DISPLAY" in
-      :*) sbx_xnum="${DISPLAY#:}"; sbx_xnum="${sbx_xnum%%.*}"; [ ! -S "/tmp/.X11-unix/X$sbx_xnum" ] || SBX_OZONE=x11 ;;
+      :*|unix:*|unix/:*)
+        sbx_xnum="${DISPLAY##*:}"; sbx_xnum="${sbx_xnum%%.*}"
+        case "$sbx_xnum" in
+          ''|*[!0-9]*) ;;
+          *) [ ! -S "${SBX_X11_UNIX_DIR:-/tmp/.X11-unix}/X$sbx_xnum" ] || SBX_OZONE=x11 ;;
+        esac ;;
       *) SBX_OZONE=x11 ;;
     esac
   fi
