@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-13T15:07:47Z
+updated_at: 2026-11-13T19:00:14Z
 ---
 
 Epic chromium-brow; order 5. Person and agent must share the intended profile,
@@ -18,6 +18,8 @@ login state, correct MCP attachment and recovery diagnostics. Never kill an
 unrelated/productive session to recover. Dependencies fres/disp; profile controls
 coordinate with secr. Initial affected fixes can join the first work package.
 
-Foundation candidate in progress: refreshed exact pins; protocol-capability display selection and strict overrides; serialized shared-profile lifecycle and safe recovery. Guest build/CDP/MCP/WebMCP/regression evidence and exact host handoff tracked in FOUNDATION-REPORT.md. Independent exact-tip QC plus native amd64 and host/human visible-window/clipboard acceptance remain pending; not complete.
+Foundation candidate in progress: refreshed exact pins; protocol-capability display selection and strict overrides; serialized shared-profile lifecycle and safe recovery. Guest build/CDP/MCP/WebMCP/regression evidence and exact host handoff tracked in FOUNDATION-REPORT.md. Historical receipt: that initial candidate awaited QC/native/host acceptance; subsequent 43d68c8 receipts and current changed-head pending checks are recorded below. Clipboard remains unresolved; not complete.
 
 Round 1 independent Claude QC failed F1 (stale same-host lock can name a reused live non-Chromium PID). Round 2 revision inspects stable proc executable/argv identity, recovers proven non-browser stale locks without signaling the process, and preserves Chromium/inaccessible-metadata refusal. Corrected fixture plus real-browser startup/PID-reuse and existing real-owner/MCP restart regressions; results in FOUNDATION-REPORT.md. Fresh exact-tip QC and host/human/native amd64 acceptance remain pending.
+
+Provenance update: 43d68c817cfe79af0053357349c693230a91400d has independent foundation QC, native AMD64 CI43452000528, and actual SBX v0.53 visible matching-token window/CDP/MCP/WebMCP/restart receipts. Current merge-fix head changes checkout, early Node libs and profile+port/listener ownership; it requires new exact-head QC/native CI and affected-scope host validation. Clipboard remains deferred unresolved; proxy/security/GPU/updater and later backlog remain open. See MERGE-FIXES-REPORT.md; no new human approval/clipboard retry requested.

@@ -7,7 +7,28 @@ host display/clipboard acceptance and external release are separate gates.
 The candidate identity is the commit containing this report (`git rev-parse HEAD`
 on the clean candidate checkout); the crew status records its exact SHA.
 
-## Round 2 — binding QC F1 revision
+## Current provenance and merge-fix follow-up
+
+The earlier foundation candidate **43d68c817cfe79af0053357349c693230a91400d**
+has independent round-2 Claude QC, native AMD64 CI
+[43452000528](https://github.com/shelajev/chromium-display-sbx-kit/actions/runs/43452000528),
+and actual SBX v0.53.0 host receipts: one visible matching-token window confirmed
+by Oleg, correct compositor selection, healthy CDP, MCP/WebMCP and same-connection
+restart/repeat start. These are receipts for **43d68c8**, not fresh proof of the
+changed head. Clipboard acceptance remains deferred and unresolved with reported
+failure; no precise failing transfer step is claimed. The bounded source-only
+clipboard report remains in crew/clipboard, unchanged.
+
+This follow-up fixes publish merge-job checkout, early bundled-Node library
+loading and cross-profile CDP listener ownership. See
+[MERGE-FIXES-REPORT.md](MERGE-FIXES-REPORT.md) for checks, preserved failed attempts,
+Dependabot's separate assessment and the current host handoff. The new exact
+candidate needs independent QC, host push/native CI and affected-scope host
+validation. Oleg already authorized merging reviewed green changes without a
+new approval pause; this guest neither pushes nor merges/publishes. No additional
+human clipboard retry or changes to the existing test window are requested.
+
+## Historical round 2 — binding QC F1 revision
 
 Independent Claude QC **failed** round 1 at
 `ef5c7a84fa077508428af77ced68429347f322d9`: the same-host SingletonLock
@@ -46,9 +67,11 @@ round-2 before/after baseline. Logs are retained under
 `sha256:b32b1097f75bc6e14697096d5ed27859ad2f526bc573da7519cd9eb5cd68d238`.
 The unchanged display code's Weston/live-bridge checks are round-1 receipts,
 not newly rerun round-2 claims. Fresh independent exact-tip QC is pending.
-Host/native amd64/clipboard acceptance remains pending; no later Bean is closed.
+At that earlier round, host/native amd64/clipboard acceptance was pending; the
+43d68c8 host/AMD64 receipts above supersede that historical status. Clipboard
+remains unresolved; no later Bean is closed.
 
-## Guest verification receipt
+## Historical guest verification receipt
 
 Verified on native Linux arm64 in this guest: full recipe build and preserved
 closure/render/DOM/CDP/MCP/WebMCP/registration smoke, display/lifecycle
@@ -183,7 +206,13 @@ It exercises CDP, MCP, WebMCP and restart/persistence in both arrangements.
 The initial optional DHI-based Weston image failed dependency resolution;
 using the recipe's Debian stage avoids mixing DHI and Debian library revisions.
 
-## Host leader / Oleg handoff (pending)
+## Historical initial host handoff (not a new retry request)
+
+The following original procedure records the first handoff. Its native AMD64
+and visible matching-token/CDP/MCP/WebMCP/restart checks now have receipts at
+43d68c8 as described above. Do not repeat its Oleg clipboard request or touch the
+current window. Use MERGE-FIXES-REPORT.md for the changed-head affected-scope
+handoff; settings/imagePaste and clipboard investigation remain outside scope.
 
 Requirements: native supported SBX (record exact build; current host reports
 0.53.0), experimental features and sandbox display enabled, and
@@ -234,8 +263,9 @@ version was `b1c6c491d1687900`). Clean up only the owned test sandbox/workspace
 using the installed SBX CLI lifecycle commands after recording results. Do not
 remove the running crew sandbox or change productive sessions.
 
-Native linux/amd64 build/smoke is also pending before portability/release claims;
-package availability and multi-arch image metadata do not prove execution.
+Native linux/amd64 build/smoke passed at 43d68c8 via CI43452000528. The new
+changed head needs its own native CI; older receipts do not establish its
+execution or external-release readiness.
 The four scoped Beans remain in-progress. All later Beans stay intact: proxy
 routing/CA/injection and profile security are next, followed by the roadmap.
 Existing direct proxy bypass, basic password store, no-sandbox, and software
