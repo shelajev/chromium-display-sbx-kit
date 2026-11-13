@@ -57,6 +57,7 @@ jobs:
 
       - name: Check script syntax
         run: |
+          python3 tools/check-workflows.py
           bash -n run.sh
-          for f in files/sbx-* files/display.sh files/test/smoke.sh tools/*.sh; do sh -n "$f"; done
+          for f in files/sbx-* files/display.sh files/test/*.sh tools/*.sh; do sh -n "$f"; done
           for f in files/*.mjs files/test/*.mjs tools/*.mjs; do node --check "$f"; done

@@ -17,11 +17,61 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
 function args(pid) { try { return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean); } catch { return []; } }
 function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } }
 function chromium(a) { return a[0] === `${prefix}/chromium/chromium` && !a.some(x => x.startsWith('--type=')); }
+function canonical(file) { try { return fs.realpathSync(file); } catch { return path.resolve(file); } }
+function matchesProfile(a, pid) {
+  const dir = a.find(x => x.startsWith('--user-data-dir='))?.slice('--user-data-dir='.length);
+  if (!dir) return false;
+  try { return canonical(path.resolve(fs.readlinkSync(`/proc/${pid}/cwd`), dir)) === canonical(profile); } catch { return false; }
+}
 function browserPids() {
   return fs.readdirSync('/proc').filter(x => /^\d+$/.test(x)).map(Number).filter(pid => {
     const a = args(pid);
-    return chromium(a) && a.includes(`--user-data-dir=${profile}`) && a.includes(`--remote-debugging-port=${port}`);
+    if (!chromium(a) || !matchesProfile(a, pid) || !a.includes(`--remote-debugging-port=${port}`)) return false;
+    try {
+      const actual = fs.statSync(`/proc/${pid}/exe`), expected = fs.statSync(`${prefix}/chromium/chromium`);
+      return actual.dev === expected.dev && actual.ino === expected.ino;
+    } catch { return false; }
   });
+}
+// A CDP-shaped JSON response and matching argv do not prove ownership. Check
+// the kernel listener inode and the browser's open FDs before using the port.
+function listenerInodes() {
+  const ipv4 = new Set(), ipv6 = new Set();
+  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let rows;
+    try { rows = fs.readFileSync(table, 'utf8').trim().split('\n').slice(1); }
+    catch (e) { if (e.code === 'ENOENT') continue; throw e; }
+    for (const row of rows) {
+      const fields = row.trim().split(/\s+/);
+      const [address, hexPort] = fields[1].split(':');
+      // Include wildcard listeners too: they can serve our loopback endpoint.
+      if (fields[3] === '0A' && parseInt(hexPort, 16) === port &&
+          ['0100007F', '00000000', '00000000000000000000000000000000', '0000000000000000FFFF00000100007F'].includes(address)) (table.endsWith('tcp') ? ipv4 : ipv6).add(fields[9]);
+    }
+  }
+  // The endpoint is IPv4 127.0.0.1. An independent ::1-only listener cannot
+  // answer it. Prefer IPv4 listeners; only consider v4-capable IPv6 fallback
+  // when no IPv4 listener exists (never accept an ::1 listener as ownership).
+  return ipv4.size ? ipv4 : ipv6;
+}
+function ownedListener(expectedPid) {
+  try {
+    const pids = browserPids();
+    if (pids.length !== 1 || (expectedPid && pids[0] !== expectedPid)) return null;
+    const pid = pids[0], listeners = listenerInodes();
+    if (!listeners.size) return null;
+    const owned = new Set();
+    for (const fd of fs.readdirSync(`/proc/${pid}/fd`)) {
+      try { const match = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/${pid}/fd/${fd}`)); if (match) owned.add(match[1]); } catch {}
+    }
+    // Ambiguous/foreign listeners, including SO_REUSEPORT, fail closed.
+    return [...listeners].every(inode => owned.has(inode)) ? pid : null;
+  } catch { return null; }
+}
+function assertOwner(pid) {
+  const current = ownedListener(pid);
+  if (!current) throw new Error('CDP listener ownership is unverified; leaving other sessions intact');
+  return current;
 }
 function json(resource) {
   return new Promise(resolve => {
@@ -33,7 +83,7 @@ function json(resource) {
     req.on('timeout', () => req.destroy()); req.on('error', () => resolve(null));
   });
 }
-async function probe() { const v = await json('/json/version'); return v && /^\w*Chrome\//.test(v.Browser || '') && typeof v.webSocketDebuggerUrl === 'string' && v.webSocketDebuggerUrl.startsWith(`ws://127.0.0.1:${port}/devtools/browser/`) ? v : null; }
+async function probe() { const pid = ownedListener(); if (!pid) return null; const v = await json('/json/version'); return ownedListener(pid) && v && /^\w*Chrome\//.test(v.Browser || '') && typeof v.webSocketDebuggerUrl === 'string' && v.webSocketDebuggerUrl.startsWith(`ws://127.0.0.1:${port}/devtools/browser/`) ? v : null; }
 async function occupied() {
   return new Promise(resolve => {
     const socket = net.createConnection({host: '127.0.0.1', port});
@@ -46,18 +96,25 @@ async function occupied() {
 async function lock() {
   fs.mkdirSync(state, {recursive: true, mode: 0o700});
   fs.mkdirSync(profile, {recursive: true, mode: 0o700});
-  const name = '\0sbx-chromium-' + createHash('sha256').update(fs.realpathSync(profile)).digest('hex');
+  const names = [`profile:${canonical(profile)}`, `port:127.0.0.1:${port}`].sort();
+  const acquired = [];
   const deadline = Date.now() + (Number(process.env.SBX_CHROME_START_TIMEOUT || 30) + 25) * 1000;
-  while (true) {
-    const server = net.createServer(socket => socket.destroy());
-    const acquired = await new Promise((resolve, reject) => {
-      server.once('error', e => e.code === 'EADDRINUSE' ? resolve(false) : reject(e));
-      server.listen(name, () => resolve(true));
-    });
-    if (acquired) return () => server.close();
-    if (Date.now() > deadline) throw new Error('lifecycle busy; retry after the active operation finishes');
-    await delay(100);
-  }
+  try {
+    for (const key of names) {
+      const name = '\0sbx-chromium-' + createHash('sha256').update(key).digest('hex');
+      while (true) {
+        const server = net.createServer(socket => socket.destroy());
+        const success = await new Promise((resolve, reject) => {
+          server.once('error', e => e.code === 'EADDRINUSE' ? resolve(false) : reject(e));
+          server.listen(name, () => resolve(true));
+        });
+        if (success) { acquired.push(server); break; }
+        if (Date.now() > deadline) throw new Error('lifecycle busy; retry after the active operation finishes');
+        await delay(100);
+      }
+    }
+    return () => { for (const server of acquired.reverse()) server.close(); };
+  } catch (e) { for (const server of acquired.reverse()) server.close(); throw e; }
 }
 // A persistent same-host lock can name an unrelated PID reused after reboot.
 // Only clear it when readable, stable proc metadata proves a non-browser.
@@ -100,6 +157,7 @@ function recoverProfile() {
 }
 async function openUrl(url) {
   if (!url) return;
+  const pid = assertOwner();
   const version = await probe();
   if (!version) throw new Error('CDP is unavailable');
   // JSON preserves URL escapes, query strings and fragments without routing
@@ -107,7 +165,10 @@ async function openUrl(url) {
   await new Promise((resolve, reject) => {
     const ws = new WebSocket(version.webSocketDebuggerUrl);
     const timer = setTimeout(() => { ws.close(); reject(new Error('CDP tab timeout')); }, 5000);
-    ws.addEventListener('open', () => ws.send(JSON.stringify({id: 1, method: 'Target.createTarget', params: {url}})));
+    ws.addEventListener('open', () => {
+      try { assertOwner(pid); ws.send(JSON.stringify({id: 1, method: 'Target.createTarget', params: {url}})); }
+      catch (e) { clearTimeout(timer); ws.close(); reject(e); }
+    });
     ws.addEventListener('message', event => {
       clearTimeout(timer); ws.close();
       try { const result = JSON.parse(event.data); result.error ? reject(new Error('CDP could not open tab')) : resolve(); }
@@ -148,7 +209,11 @@ async function start(url) {
 }
 async function stop() {
   const pids = browserPids();
-  if (!pids.length) return;
+  if (!pids.length) {
+    if (await occupied()) throw new Error('CDP port belongs to another session; leaving it intact');
+    return;
+  }
+  const pid = assertOwner();
   const version = await probe();
   if (version) {
     // SIGTERM can exit before Chromium flushes recently written cookies.
@@ -157,14 +222,17 @@ async function stop() {
       const ws = new WebSocket(version.webSocketDebuggerUrl);
       const timer = setTimeout(() => { ws.close(); reject(new Error('CDP close timed out; session left intact')); }, 5000);
       const finish = () => { clearTimeout(timer); ws.close(); resolve(); };
-      ws.addEventListener('open', () => ws.send(JSON.stringify({id: 1, method: 'Browser.close'})));
+      ws.addEventListener('open', () => {
+        try { assertOwner(pid); ws.send(JSON.stringify({id: 1, method: 'Browser.close'})); }
+        catch (e) { clearTimeout(timer); ws.close(); reject(e); }
+      });
       ws.addEventListener('message', finish, {once: true});
       ws.addEventListener('close', finish, {once: true});
       ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP close failed; session left intact')); }, {once: true});
     });
   } else {
     for (const pid of pids) {
-      if (browserPids().includes(pid)) try { process.kill(pid, 'SIGTERM'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
+      if (ownedListener(pid)) try { process.kill(pid, 'SIGTERM'); } catch (e) { if (e.code !== 'ESRCH') throw e; }
     }
   }
   for (let i = 0; i < 80; i++) { if (!browserPids().length) { fs.rmSync(`${state}/session.json`, {force: true}); return; } await delay(250); }
@@ -173,22 +241,23 @@ async function stop() {
 async function diag() {
   const pids = browserPids(); const version = await probe();
   let session = {}; try { session = JSON.parse(fs.readFileSync(`${state}/session.json`)); } catch {}
+  if (session.pid !== pids[0] || session.port !== port) session = {};
   let singleton = 'absent'; try { fs.lstatSync(`${profile}/SingletonLock`); singleton = 'present'; } catch {}
   const displays = await discover();
-  console.log(JSON.stringify({running: !!pids.length, pids, mode: pids.length ? session.mode || 'unknown' : 'stopped', displaySocket: pids.length ? session.displaySocket : null, port, cdpHealthy: !!version && !!pids.length, targetCount: version && pids.length ? (await json('/json/list'))?.length ?? null : null, profile, singleton, proxy: 'direct / --no-proxy-server', displayCandidates: displays.results.map(({path, kind, globals}) => ({path, kind, globals}))}, null, 2));
+  console.log(JSON.stringify({running: !!pids.length, pids, mode: pids.length ? session.mode || 'unknown' : 'stopped', displaySocket: pids.length ? session.displaySocket : null, port, cdpHealthy: !!version && !!pids.length, targetCount: version && ownedListener() ? (await json('/json/list'))?.length ?? null : null, profile, singleton, proxy: 'direct / --no-proxy-server', displayCandidates: displays.results.map(({path, kind, globals}) => ({path, kind, globals}))}, null, 2));
 }
 const [command = 'start', ...rest] = process.argv.slice(2);
 try {
-  if (command === 'status') {
-    const v = browserPids().length && await probe();
-    if (!v) throw new Error('not running with healthy managed CDP');
-    console.log(JSON.stringify(v));
-  } else if (['diag', 'doctor'].includes(command)) await diag();
-  else if (['--help', '-h'].includes(command)) console.log('sbx-chrome [start [URL] | URL | stop | restart [URL] | status | diag]');
+  if (['--help', '-h'].includes(command)) console.log('sbx-chrome [start [URL] | URL | stop | restart [URL] | status | diag]');
   else {
     const release = await lock();
     try {
-      if (command === 'stop') await stop();
+      if (command === 'status') {
+        const v = await probe();
+        if (!v) throw new Error('not running with healthy managed CDP listener');
+        console.log(JSON.stringify(v));
+      } else if (['diag', 'doctor'].includes(command)) await diag();
+      else if (command === 'stop') await stop();
       else if (command === 'restart') { await stop(); await start(rest[0]); }
       else if (command === '--if-display') {
         const r = spawnSync('/bin/sh', ['-c', '. "$1/libexec/display.sh"; sbx_detect_display || exit; test "$SBX_OZONE" != headless', 'display', prefix], {env: {...process.env, PREFIX: prefix}, encoding: 'utf8'});

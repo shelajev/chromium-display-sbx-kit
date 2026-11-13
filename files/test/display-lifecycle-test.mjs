@@ -77,6 +77,18 @@ try {
   assert.equal((await detect({SBX_CHROME_HEADLESS:'1',SBX_WAYLAND_SOCKET:'missing'})).stdout,'headless:');
   try { await exec(`${prefix}/bin/sbx-chromium`,['--headless'],{env}); } catch(e) {assert.match(e.stdout,/--ozone-platform=headless/);assert.equal(e.stderr,'');}
   try { await exec(`${prefix}/bin/sbx-chromium`,['--version'],{env}); } catch(e) {assert.match(e.stdout,/--version/);assert.equal(e.stderr,'');}
+  // Probe must receive private libraries before the wrapper exports them.
+  // A sentinel bundled-node loader catches reliance on this machine's libs.
+  const nodePath = `${prefix}/node/bin/node`;
+  fs.unlinkSync(nodePath);
+  fs.writeFileSync(nodePath, `#!/bin/sh
+case \"$LD_LIBRARY_PATH\" in \"${prefix}/lib\"*) ;; *) exit 92 ;; esac
+exec \"${process.execPath}\" \"$@\"
+`, {mode:0o755});
+  assert.equal((await detect({SBX_WAYLAND_SOCKET:`${display}/wayland-0`,LD_LIBRARY_PATH:''})).code,0);
+  try { await exec(`${prefix}/bin/sbx-chromium`, ['--dump-dom','about:blank'], {env:{...env,LD_LIBRARY_PATH:'',SBX_WAYLAND_SOCKET:`${display}/wayland-0`}}); }
+  catch(e) { assert.equal(e.code,1);assert.match(e.stdout,/--ozone-platform=wayland/);assert.equal(e.stderr,''); }
+  fs.unlinkSync(nodePath);fs.symlinkSync(process.execPath,nodePath);
   fs.mkdirSync(env.CHROME_USER_DATA_DIR,{recursive:true});
   for (const owner of ['old-container-999999',`${os.hostname()}-999999`]) {
     fs.symlinkSync(owner,`${env.CHROME_USER_DATA_DIR}/SingletonLock`);

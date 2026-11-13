@@ -3,10 +3,16 @@ sbx_detect_display() {
   SBX_OZONE=headless
   unset SBX_DISPLAY_SOCKET
   if [ "${SBX_CHROME_HEADLESS:-0}" = 1 ]; then return 0; fi
-  sbx_node="${PREFIX:-@PREFIX@}/node/bin/node"
-  [ -x "$sbx_node" ] || sbx_node=node
+  sbx_prefix="${PREFIX:-@PREFIX@}"
+  sbx_node="$sbx_prefix/node/bin/node"
+  sbx_libs="${LD_LIBRARY_PATH:-}"
+  if [ -x "$sbx_node" ]; then
+    sbx_libs="$sbx_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  else
+    sbx_node=node
+  fi
   sbx_probe="${PREFIX:-@PREFIX@}/libexec/wayland-probe.mjs"
-  sock="$("$sbx_node" "$sbx_probe")" || return 1
+  sock="$(LD_LIBRARY_PATH="$sbx_libs" "$sbx_node" "$sbx_probe")" || return 1
   if [ -n "$sock" ]; then
     SBX_OZONE=wayland
     export SBX_DISPLAY_SOCKET="$sock" WAYLAND_DISPLAY="$sock"
