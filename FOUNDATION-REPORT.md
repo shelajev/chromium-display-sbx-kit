@@ -7,6 +7,47 @@ host display/clipboard acceptance and external release are separate gates.
 The candidate identity is the commit containing this report (`git rev-parse HEAD`
 on the clean candidate checkout); the crew status records its exact SHA.
 
+## Round 2 — binding QC F1 revision
+
+Independent Claude QC **failed** round 1 at
+`ef5c7a84fa077508428af77ced68429347f322d9`: the same-host SingletonLock
+pre-check refused any live PID, preventing recovery after a persistent stale
+lock's PID was reused by a non-Chromium process. The round 1 receipt below is
+historical implementation evidence, not acceptance; its broad "live owner"
+wording is corrected by the ownership rules here. The independent failure and
+all earlier failed/recovered attempts remain recorded in crew QC/evidence logs.
+
+The revised check reads `/proc/<pid>/exe`, executable inode identity and
+NUL-separated argv, with process-start-time and executable-identity checks to
+refuse unstable metadata. Chromium executable/argv names (including alternate
+Chrome paths) or the bundled binary's inode remain protected, regardless of
+CDP port. Missing, inaccessible (`EACCES`/`EPERM`), empty or unstable live-process
+metadata also remains protected. Only a provably non-Chromium live PID, a dead
+PID or an old hostname permits stale Singleton cleanup. Recovery never signals
+the lock-named process. This fixes the kit pre-check without trusting PID
+liveness as proof of browser ownership.
+
+The fixture now expects stale lock recovery for its own live non-Chromium Node
+PID, verifies launch was attempted and the process remains alive, and adds
+Chromium-looking argv plus injected proc-permission-denial refusal checks.
+Build smoke seeds the real shared profile lock with a live non-Chromium PID
+before concurrent cold launches, verifies Chromium takes over that lock and
+the unrelated process stays alive, then runs the preserved real Chromium
+other-port owner refusal and MCP/WebMCP/restart/cookie/localStorage tests.
+Round 2 native arm64 build **passes** with all preserved smoke checks, the
+new PID-reuse and metadata-boundary regressions, and the existing real Chromium
+other-port protection plus MCP/WebMCP/restart/cookie/localStorage tests. TCK
+m.12 **19/19 passes**; ownership **968 entries, all 0/0**; shell/JS syntax,
+Beans and git whitespace checks pass. Agent configuration hashes match the
+round-2 before/after baseline. Logs are retained under
+`/tmp/chromium-foundation-evidence/round2/` (`targeted-permissions.log`,
+`build-final.log`, `tck.log`); the OCI layout is
+`/tmp/chromium-display-layout-round2-final`, manifest
+`sha256:b32b1097f75bc6e14697096d5ed27859ad2f526bc573da7519cd9eb5cd68d238`.
+The unchanged display code's Weston/live-bridge checks are round-1 receipts,
+not newly rerun round-2 claims. Fresh independent exact-tip QC is pending.
+Host/native amd64/clipboard acceptance remains pending; no later Bean is closed.
+
 ## Guest verification receipt
 
 Verified on native Linux arm64 in this guest: full recipe build and preserved

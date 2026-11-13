@@ -59,13 +59,41 @@ async function lock() {
     await delay(100);
   }
 }
+// A persistent same-host lock can name an unrelated PID reused after reboot.
+// Only clear it when readable, stable proc metadata proves a non-browser.
+// Treat Chromium under another path/argv spelling and inaccessible metadata
+// conservatively; never signal the process named by a SingletonLock.
+function liveChromiumOwner(pid) {
+  if (!alive(pid)) return false;
+  try {
+    const proc = `/proc/${pid}`;
+    const generation = () => {
+      const stat = fs.readFileSync(`${proc}/stat`, 'utf8');
+      return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]; // starttime
+    };
+    const before = generation();
+    const executable = fs.readlinkSync(`${proc}/exe`).replace(/ \(deleted\)$/, '');
+    const identity = fs.statSync(`${proc}/exe`);
+    const argv = fs.readFileSync(`${proc}/cmdline`, 'utf8').split('\0').filter(Boolean);
+    const after = fs.statSync(`${proc}/exe`);
+    if (!before || before !== generation() || !argv.length ||
+        identity.dev !== after.dev || identity.ino !== after.ino) return true;
+    const browserName = value => /^(chromium(-browser)?|chrome|google-chrome(-stable|-beta|-unstable)?|headless_shell)$/.test(path.basename(value));
+    const bundled = fs.statSync(`${prefix}/chromium/chromium`);
+    return browserName(executable) || browserName(argv[0]) ||
+      (identity.dev === bundled.dev && identity.ino === bundled.ino);
+  } catch {
+    // Includes EPERM/EACCES, missing exe for a live process, and exec races.
+    // A process that disappeared meanwhile no longer owns a productive session.
+    return alive(pid);
+  }
+}
 function recoverProfile() {
   const file = `${profile}/SingletonLock`; let target;
   try { target = fs.readlinkSync(file); } catch (e) { if (e.code === 'ENOENT') return; throw new Error('unrecognized profile lock; leaving it intact'); }
   const match = /^(.*)-(\d+)$/.exec(target);
   if (!match) throw new Error('unrecognized profile lock; leaving it intact');
-  if (match[1] === os.hostname() && alive(Number(match[2]))) {
-    // Refuse all live owners, even if proc metadata is inaccessible.
+  if (match[1] === os.hostname() && liveChromiumOwner(Number(match[2]))) {
     throw new Error('profile has a live owner; leaving browser and SingletonLock intact (check profile/port)');
   }
   for (const name of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) fs.rmSync(`${profile}/${name}`, {force: true});

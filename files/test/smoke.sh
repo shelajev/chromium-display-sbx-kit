@@ -37,8 +37,16 @@ sbx-chromium --headless --dump-dom "file://$PWD/page.html" 2>/dev/null | grep -q
 # 4. The shared browser: starts headless without a display, answers CDP.
 "$PREFIX/node/bin/node" -e '
  const {execFile} = require("node:child_process");
+ const fs = require("node:fs"), os = require("node:os");
+ const profile = process.env.HOME + "/.config/sbx-chromium/profile";
+ fs.mkdirSync(profile, {recursive:true});
+ fs.symlinkSync(os.hostname() + "-" + process.pid, profile + "/SingletonLock");
  const bin = process.env.PREFIX + "/bin/sbx-chrome";
- Promise.all(["start", "start", "start", "--if-display"].map(arg => new Promise((resolve,reject) => execFile(bin,[arg],(e,out,err) => e ? reject(e) : resolve())))).catch(e => { console.error(e); process.exitCode=1; });'
+ Promise.all(["start", "start", "start", "--if-display"].map(arg => new Promise((resolve,reject) => execFile(bin,[arg],(e,out,err) => e ? reject(e) : resolve())))).then(() => {
+  process.kill(process.pid, 0);
+  if (fs.readlinkSync(profile + "/SingletonLock") === os.hostname() + "-" + process.pid) throw Error("stale lock not recovered");
+  console.log("live non-Chromium PID reuse -> real browser startup: ok");
+ }).catch(e => { console.error(e); process.exitCode=1; });'
 sbx-chrome status | grep -q "Chrome/$CHROMIUM_VERSION"
 
 # 5. The MCP server, end to end, including a WebMCP tool round trip.

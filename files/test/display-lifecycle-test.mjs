@@ -83,11 +83,42 @@ try {
     assert.notEqual((await chrome(['start'],{SBX_CHROME_HEADLESS:'1'})).code,0);
     assert.throws(()=>fs.readlinkSync(`${env.CHROME_USER_DATA_DIR}/SingletonLock`));
   }
-  // Live owner is intentionally a different process: fail closed even if
-  // metadata is unavailable or an unexpected invocation owns the profile.
-  fs.symlinkSync(`${os.hostname()}-${process.pid}`,`${env.CHROME_USER_DATA_DIR}/SingletonLock`);
-  const r=await chrome(['start'],{SBX_CHROME_HEADLESS:'1'});assert.match(r.stderr,/live owner/);
-  assert.equal(fs.readlinkSync(`${env.CHROME_USER_DATA_DIR}/SingletonLock`),`${os.hostname()}-${process.pid}`);
+  // A same-host stale lock can name a PID reused by a live non-Chromium
+  // process. Recover the lock, attempt launch, and leave that process alive.
+  const lockPath = `${env.CHROME_USER_DATA_DIR}/SingletonLock`;
+  fs.symlinkSync(`${os.hostname()}-${process.pid}`,lockPath);
+  const recovered = await chrome(['start'],{SBX_CHROME_HEADLESS:'1'});
+  assert.match(recovered.stderr,/exited before CDP readiness/); // fake browser
+  assert.throws(()=>fs.readlinkSync(lockPath));
+  process.kill(process.pid,0);
+  // Simulate the proc permission boundary without changing guest privileges.
+  // Missing/inaccessible metadata must not be mistaken for a non-browser.
+  for (const code of ['EACCES', 'EPERM']) {
+    const preload = `${dir}/deny-proc.cjs`;
+    fs.writeFileSync(preload, `const fs = require('node:fs'); const readlink = fs.readlinkSync;
+      fs.readlinkSync = function(file, ...args) {
+        if (file === '/proc/${process.pid}/exe') throw Object.assign(new Error('denied'), {code:'${code}'});
+        return readlink.call(this, file, ...args);
+      };`);
+    fs.symlinkSync(`${os.hostname()}-${process.pid}`,lockPath);
+    const denied = await chrome(['start'], {SBX_CHROME_HEADLESS:'1', NODE_OPTIONS:`--require=${preload}`});
+    assert.match(denied.stderr,/live owner/);
+    assert.equal(fs.readlinkSync(lockPath),`${os.hostname()}-${process.pid}`);
+    process.kill(process.pid,0);
+    fs.unlinkSync(lockPath);
+  }
+  // Chromium-looking argv must remain protected even when exe is different.
+  const owner = spawn(process.execPath,['-e',"process.stdout.write('ready');setInterval(()=>{},1000)"],{argv0:`${prefix}/chromium/chromium`});
+  await new Promise(r=>owner.stdout.once('data',r));
+  try {
+    fs.symlinkSync(`${os.hostname()}-${owner.pid}`,lockPath);
+    const refused = await chrome(['start'],{SBX_CHROME_HEADLESS:'1'});
+    assert.match(refused.stderr,/live owner/);
+    assert.equal(fs.readlinkSync(lockPath),`${os.hostname()}-${owner.pid}`);
+    process.kill(owner.pid,0);
+  } finally {
+    owner.kill('SIGTERM'); await new Promise(r=>owner.once('exit',r));
+  }
   const listener = net.createServer(s=>s.end());await new Promise(r=>listener.listen(0,'127.0.0.1',r));servers.push(listener);
   const conflict=await chrome(['start'],{CHROME_REMOTE_DEBUGGING_PORT:String(listener.address().port)});
   assert.match(conflict.stderr,/occupied/);assert.equal(listener.listening,true);
