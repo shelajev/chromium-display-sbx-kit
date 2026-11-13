@@ -2,11 +2,11 @@
 
 A Docker Sandboxes **mixin** kit that gives any agent a real browser:
 
-- **Chromium 154** (Debian's build, amd64 + arm64) with its own libraries and
+- **Chromium 156** (Debian's build, amd64 + arm64) with its own libraries and
   fonts, so it runs on bases that have neither.
 - The **`chrome-devtools` MCP server**, attached to that browser, with the
   **WebMCP** tools on: pages that expose tools through WebMCP
-  (`document.modelContext` in Chromium 154) can be listed (`list_webmcp_tools`) and called (`execute_webmcp_tool`).
+  (`document.modelContext` in Chromium 156) can be listed (`list_webmcp_tools`) and called (`execute_webmcp_tool`).
 - Automatic MCP registration for whichever agent is installed — Claude Code,
   Codex, Gemini CLI, Cursor, OpenCode — in that agent's user config.
 
@@ -86,7 +86,7 @@ demand, so the tools also work after you close the window.
 
 ### WebMCP
 
-WebMCP lets a page publish tools for agents. Chromium 154 exposes it as
+WebMCP lets a page publish tools for agents. Chromium 156 exposes it as
 `document.modelContext` (the draft spec says `navigator.modelContext`; feature-
 detect both), and only with `--enable-features=WebMCP`, which the kit's
 launcher always passes:
@@ -208,3 +208,28 @@ git push origin v2.0.0
 Apache 2.0 for the kit itself. See [LICENSE](LICENSE); the shipped components'
 licences are listed in the descriptor and their notices are under
 `/opt/sbx-chromium/share/doc`.
+
+### Display and session recovery
+
+`sbx-chrome` probes Wayland registry globals for `wl_compositor` and
+`xdg_wm_base`. A clipboard-only socket is not a display. A unique compositor
+wins; multiple compositors require a valid ambient `WAYLAND_DISPLAY` or strict
+`SBX_WAYLAND_SOCKET=/path/to/socket`. A relative override resolves under
+`XDG_RUNTIME_DIR` (default `/run/display`). Missing/stale/clipboard-only overrides
+fail. With no compositor, local X11 requires its socket; otherwise the browser
+runs headless. `SBX_CHROME_HEADLESS=1` always forces headless. One-shot
+`sbx-chromium --headless` and version queries bypass display selection.
+
+`sbx-chrome diag` reports safe display/session metadata and CDP target count,
+without page URLs, titles, or profile contents. Lifecycle operations serialize
+per canonical profile using Linux abstract Unix sockets, automatically released
+on process death. A live profile owner or foreign CDP listener is never killed
+or clobbered. `restart [URL]` waits for graceful shutdown and retains the profile;
+the existing MCP connection reconnects. Browser logs may contain browsing data:
+inspect locally only when needed, never export them as safe diagnostics.
+
+WebMCP pages should use `navigator.modelContext || document.modelContext` while
+Chromium transitions the experimental API. See [candidate verification and host
+handoff](FOUNDATION-REPORT.md) for exact build/test commands and pending native
+host/human acceptance. Proxy routing, profile security, GPU validation, and
+release readiness remain subsequent work packages.

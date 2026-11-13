@@ -8,6 +8,10 @@
 set -eu
 PREFIX=@PREFIX@
 . "$PREFIX/libexec/display.sh"
+# One-shot requests bypass display discovery, including strict overrides.
+for arg in "$@"; do
+  case "$arg" in --headless|--headless=*|--version|--product-version) SBX_CHROME_HEADLESS=1 ;; esac
+done
 sbx_detect_display
 
 export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

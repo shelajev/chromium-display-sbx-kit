@@ -139,5 +139,5 @@ jobs:
 
       - name: Validate the published kit
         run: |
-          go install github.com/docker/sandbox-kit-spec/v3/cmd/kit-tck@v3.0.0-m.6
+          sh tools/install-kit-tck.sh
           "$(go env GOPATH)/bin/kit-tck" validate "$IMAGE:$VERSION"

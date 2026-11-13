@@ -32,8 +32,13 @@ sbx-chromium --headless --screenshot="$PWD/shot.png" --window-size=800,200 "file
 test "$(wc -c < shot.png)" -gt 4000
 sbx-chromium --headless --dump-dom "file://$PWD/page.html" 2>/dev/null | grep -q 'renders text'
 
+"$PREFIX/node/bin/node" /tmp/test/display-lifecycle-test.mjs
+
 # 4. The shared browser: starts headless without a display, answers CDP.
-sbx-chrome start
+"$PREFIX/node/bin/node" -e '
+ const {execFile} = require("node:child_process");
+ const bin = process.env.PREFIX + "/bin/sbx-chrome";
+ Promise.all(["start", "start", "start", "--if-display"].map(arg => new Promise((resolve,reject) => execFile(bin,[arg],(e,out,err) => e ? reject(e) : resolve())))).catch(e => { console.error(e); process.exitCode=1; });'
 sbx-chrome status | grep -q "Chrome/$CHROMIUM_VERSION"
 
 # 5. The MCP server, end to end, including a WebMCP tool round trip.
@@ -57,3 +62,9 @@ test "$(grep -c '^\[mcp_servers.chrome-devtools\]' "$HOME/.codex/config.toml")" 
 grep -q '^approval_policy = "never"' "$HOME/.codex/config.toml"
 test ! -e "$HOME/.gemini"
 echo "smoke: ok"
+
+# Existing single-quoted TOML server headers are user configuration too.
+printf "[mcp_servers.'chrome-devtools']\ncommand = \"custom\"\n" > "$HOME/.codex/config.toml"
+cp "$HOME/.codex/config.toml" before.toml
+PATH="$PWD/fakebin:$PATH" sbx-browser-register
+cmp before.toml "$HOME/.codex/config.toml"

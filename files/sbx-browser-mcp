@@ -10,9 +10,10 @@ set -eu
 PREFIX=@PREFIX@
 port="${CHROME_REMOTE_DEBUGGING_PORT:-9222}"
 
-"$PREFIX/bin/sbx-chrome" start </dev/null >&2 \
-  || echo "sbx-browser-mcp: continuing without a browser; tools will fail until 'sbx-chrome' succeeds" >&2
+"$PREFIX/bin/sbx-chrome" start </dev/null >&2
 
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
+export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
 export CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1
 export CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=1
 export LD_LIBRARY_PATH="$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
