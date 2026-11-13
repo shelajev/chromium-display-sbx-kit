@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-13T20:14:37Z
+updated_at: 2026-11-13T20:26:25Z
 ---
 
 Epic chromium-brow; order 7. Add weekly/manual maintenance that detects available
@@ -36,3 +36,7 @@ Host acceptance remains pending: actual GitHub settings/branch rules, pushes, di
 - [x] QC round 2: real CLI empty-input/report regressions and already-shipped young-pin retention
 
 Round 2 correction: CLI now accepts empty optional strings passed by normal schedule/manual workflow argv and writes failure reports for argument/setup errors. Spawned CLI fixtures exercise actual invocation shape with local official-source-format HTTP fixtures, including schedule/manual apply, default manual dry-run, no-change/failure reports and a manual urgent Chromium update followed by a schedule while still young. Existing current pins retain resolution/compatibility checks without requiring renewed age exceptions; all new-pin seven-day gates and exact manual exception restrictions remain. Live read-only workflow-shaped CLI passed with empty security inputs and produced JSON/Markdown; no pin changes applied. No runtime/build/architecture changes or repeated guest build; prior native evidence remains separately recorded.
+
+- [x] QC round 3: DHI challenge/auth contract, sanitized failure reports and HTTP regressions
+
+Round 3 correction candidate: actual hosted main dry-run 43500465218 failed DHI token401 despite f788bc9 native both-arch CI 43499907098. Official DHI docs require authentication; no anonymous-parity claim remains. Replaced raw token/registry handling with existing Docker Buildx imagetools metadata resolver and added the already-pinned Buildx setup to detection. Raw immutable indices are hash-checked; both linux/amd64 and linux/arm64 manifests/configs are required; Buildx content verification and seven-day/new-pin exception rules remain gates. No credential files read by agent, no token values printed, no new login/credential/secret wiring. Real Buildx HTTP fixtures verify Bearer challenge/advertised token realm, signed config redirects, denied token/redirect failures without leaked bodies/query signatures, and rejection of corrupt platform/config content. Guest live workflow-argv dry-run and affected syntax/guards/actionlint/Beans pass. Hosted maintenance on this correction is not yet proven; owner must verify existing Docker/Buildx access on the actual detection runner. Native build success alone does not establish that prerequisite.

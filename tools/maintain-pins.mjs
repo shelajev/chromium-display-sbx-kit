@@ -38,16 +38,18 @@ async function request(url,{method='GET',headers={},missing=false}={}) {
   // curl honors normal HTTPS proxy/CA settings in SBX and on hosted runners.
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'pin-http-'));
   try {
-    const args=['--silent','--show-error','--location','--max-time','90','--retry','2','--dump-header',dir+'/headers','--output',dir+'/body','--write-out','%{http_code}'];
+    const args=['--disable','--silent','--show-error','--location','--max-time','90','--retry','2','--dump-header',dir+'/headers','--output',dir+'/body','--write-out','%{http_code}'];
     if(method==='HEAD') args.push('--head');
     for(const [k,v] of Object.entries(headers)) args.push('--header',k+': '+v);
     args.push(url);
-    const {stdout}=await exec('curl',args,{maxBuffer:1024*1024});
+    let stdout;
+    try {({stdout}=await exec('curl',args,{maxBuffer:1024*1024}));}
+    catch {throw new Error(new URL(url).origin+new URL(url).pathname+': transport request failed (raw diagnostics suppressed)');}
     const status=Number(stdout);
     const raw=fs.readFileSync(dir+'/headers','utf8').trim().split(/\r?\n\r?\n/).at(-1);
     const h=Object.fromEntries(raw.split(/\r?\n/).slice(1).map(l=>{const i=l.indexOf(':');return [l.slice(0,i).toLowerCase(),l.slice(i+1).trim()];}));
     if(status===404 && missing) return null;
-    if(status!==200) throw new Error(url+': HTTP '+status+' '+fs.readFileSync(dir+'/body','utf8').slice(0,300));
+    if(status!==200) throw new Error(new URL(url).origin+new URL(url).pathname+': HTTP '+status+' (response body suppressed)');
     return {body:fs.readFileSync(dir+'/body'),headers:h};
   } finally {fs.rmSync(dir,{recursive:true,force:true});}
 }
@@ -172,34 +174,55 @@ export async function maintain(options={}) {
     if(!tckNext) throw new Error('No mature kit-tck available');
     change('kit-tck',tck,tckNext);replace('tools/install-kit-tck.sh','version='+tck,'version='+tckNext);
 
+    report.notes.push('OCI metadata resolver: docker buildx imagetools inspect (immutable index/config resolution)');
     for(const [component,image,tag] of [['debian','library/debian','trixie'],['debian-base','debian-base','trixie-dev'],['node','node','24-debian13-dev']]) {
       const registry=component==='debian' ? (options.dockerBase || 'https://registry-1.docker.io') : (options.dhiBase || 'https://dhi.io');
       const ref=(component==='debian'?'debian': 'dhi.io/'+image)+':'+tag;
       const old=texts.get('chromium-display.dockerfile').match(new RegExp(ref+'@(sha256:[a-f0-9]{64})'))?.[1];
       if(!old) throw new Error('Missing OCI pin '+ref);
       report.sources.push(registry+'/v2/'+image+'/manifests/'+tag);
-      let headers={Accept:'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'};
-      // Public registries use standard anonymous bearer authentication.
-      const authUrl=component==='debian'?'https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/debian:pull':'https://dhi.io/token?service=registry.docker.io&scope=repository:'+image+':pull';
-      if(!options.dockerBase && component==='debian' || !options.dhiBase && component!=='debian') {
-        const auth=await json(authUrl);headers.Authorization='Bearer '+(auth.token || auth.access_token);
-      }
-      const get=async (kind,pin,missing=false)=>request(registry+'/v2/'+image+'/'+kind+'/'+pin,{headers,missing});
+      // Use the existing Docker/Buildx metadata resolver, including its registry
+      // challenges, redirects and configured authentication. Never read Docker
+      // credential files or construct/log registry tokens in this tool.
+      const repository=(component==='debian' ? (options.dockerBase ? new URL(options.dockerBase).host : 'docker.io') : (options.dhiBase ? new URL(options.dhiBase).host : 'dhi.io'))+'/'+image;
       const inspect=async pin=>{
-        const r=await get('manifests',pin,true);if(!r) return null;
-        const digest=sha(r.body);
+        const target=repository+(pin.startsWith('sha256:')?'@':':')+pin;
+        const invoke=async args=>{
+          try {return (await exec('docker',['buildx','imagetools','inspect',target,...args],{encoding:'buffer',maxBuffer:10*1024*1024,timeout:90000})).stdout;}
+          catch(e) {
+            // Registry/CLI stderr may contain bearer tokens or signed redirect
+            // URLs. Classify it privately; never copy it into a report.
+            const diagnostic=String(e.stderr || '');
+            const denied=/401|403|unauthorized|denied|forbidden/i.test(diagnostic);
+            if(!denied && /: not found\b|manifest unknown/i.test(diagnostic) && pin.startsWith('sha256:')) return null;
+            const reason=denied?'authentication denied':e.code==='ENOENT'?'Docker/Buildx unavailable':'metadata request failed';
+            throw new Error('OCI resolver '+reason+' for '+target+'. Verify the existing Docker/Buildx pull route on this runner. DHI Community requires registry authentication; successful native builds or SBX checks do not establish updater access. No pin checks were skipped.');
+          }
+        };
+        const body=await invoke(['--raw']);if(!body) return null;
+        const digest=sha(body);
         if(pin.startsWith('sha256:') && digest!==pin) throw new Error(ref+': digest mismatch');
-        const index=JSON.parse(r.body);const dates=[];
+        let index;
+        try {index=JSON.parse(body);} catch {throw new Error(ref+': invalid OCI index JSON');}
         for(const arch of arches) {
           const p=index.manifests?.find(m=>m.platform?.os==='linux' && m.platform.architecture===arch);
-          if(!p) throw new Error(ref+' '+pin+': missing linux/'+arch);
-          const manifest=await get('manifests',p.digest);
-          if(sha(manifest.body)!==p.digest) throw new Error('platform manifest digest mismatch');
-          const configDigest=JSON.parse(manifest.body).config.digest;
-          const config=await get('blobs',configDigest);
-          if(sha(config.body)!==configDigest) throw new Error('config digest mismatch');
-          dates.push(JSON.parse(config.body).created);
+          if(!p || !/^sha256:[a-f0-9]{64}$/.test(p.digest)) throw new Error(ref+' '+pin+': missing linux/'+arch+' manifest');
         }
+        // Resolve configs from the immutable index, never from the moving tag.
+        // Buildx's loader verifies platform/config blobs against descriptors.
+        const configTarget=repository+'@'+digest;
+        let configs;
+        try {
+          const r=await exec('docker',['buildx','imagetools','inspect',configTarget,'--format','{{json .Image}}'],{maxBuffer:10*1024*1024,timeout:90000});
+          configs=JSON.parse(r.stdout);
+        } catch {
+          throw new Error('OCI config resolution failed for '+configTarget+'. Verify Docker/Buildx registry access and content digests; raw diagnostics suppressed. No pin checks were skipped.');
+        }
+        const dates=arches.map(arch=>{
+          const config=configs['linux/'+arch];
+          if(!config || config.os!=='linux' || config.architecture!==arch) throw new Error(ref+': missing verified linux/'+arch+' config');
+          return config.created;
+        });
         return {digest,dates};
       };
       const currentImage=await inspect(old);

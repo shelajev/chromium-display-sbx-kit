@@ -239,7 +239,7 @@ After this workflow is merged to the default branch (`main`), **Weekly pin
 maintenance** runs every Monday at 08:17 UTC, or through `workflow_dispatch`.
 Scheduled runs propose updates; manual runs default to a report-only dry run.
 The report and JSON artifact distinguish `no-change`, `update` and `failure`.
-For a local read-only check (Node 24, curl, xz and dpkg required):
+For a local read-only check (Node 24, curl, xz, dpkg and Docker Buildx required):
 
 ```sh
 node tools/maintain-pins.mjs --dry-run
@@ -248,7 +248,12 @@ node tools/maintain-pins.mjs --dry-run
 The tool reads Debian's trixie/security/updates package indices, the official
 npm registry, the Go module proxy, and Docker Hub/DHI OCI APIs. It updates
 Chromium and its Debian revision together, chrome-devtools-mcp, kit-tck, and
-the three pinned base/builder image digests. Both amd64 and arm64 must exist
+the three pinned base/builder image digests. OCI metadata is read with
+`docker buildx imagetools inspect`, using Docker's existing registry resolver
+for authentication challenges and redirects. The updater does not read credential
+stores, implement token authentication, or log registry response bodies. It hashes
+raw indices itself and resolves configs from the immutable index digest; Buildx
+verifies platform/config content against the descriptors. Both amd64 and arm64 must exist
 for shared Chromium and OCI pins. Debian versions use dpkg ordering; TCK
 milestones use semantic version ordering. MCP updates must retain the bundled
 launcher path, dependency-free packaging and a recognized Node 24-compatible
@@ -292,7 +297,16 @@ GitHub prerequisites (owners verify these; this change does not alter settings):
   **Allow GitHub Actions to create and approve pull requests** if permitted
   by organization policy. The proposal job requests `contents: write`,
   `pull-requests: write`, and `actions: write`; the other jobs use read access.
-  PR creation errors point to this setting. No PAT or new secret is needed.
+  PR creation errors point to this setting. GitHub PR and dispatch operations
+  need no PAT or new secret.
+- The detection runner must be able to resolve `dhi.io/debian-base:trixie-dev`
+  and `dhi.io/node:24-debian13-dev` through its existing Docker/Buildx route.
+  [Docker documents DHI Community pulls as authenticated](https://docs.docker.com/dhi/how-to/use/).
+  A successful native build or SBX updater run does not establish hosted
+  maintenance access. The workflow sets up Buildx, but provisions no new login,
+  credential or secret. If its existing route lacks access, maintenance fails
+  closed with a sanitized resolver diagnostic; an owner must resolve that
+  authentication prerequisite. No registry or pin check is skipped.
 - Branch rules must permit the workflow identity to write the dedicated bot
   branch and force-update it. Main protections remain in effect.
 - Both workflows must exist on the default branch before manual dispatch;
@@ -321,4 +335,6 @@ Official references: [GitHub workflow triggering and token exceptions](https://d
 [Debian version ordering](https://www.debian.org/doc/debian-policy/ch-controlfields.html#version),
 [npm metadata](https://registry.npmjs.org/chrome-devtools-mcp),
 [Go proxy protocol](https://go.dev/ref/mod#goproxy-protocol), and
-[OCI image index platforms](https://github.com/opencontainers/image-spec/blob/main/image-index.md).
+[OCI image index platforms](https://github.com/opencontainers/image-spec/blob/main/image-index.md),
+[Buildx metadata inspection](https://docs.docker.com/reference/cli/docker/buildx/imagetools/inspect/), and
+[registry authentication challenges](https://docs.docker.com/reference/api/registry/auth/).

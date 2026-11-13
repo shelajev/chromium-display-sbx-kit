@@ -1,5 +1,6 @@
 // Local HTTP fixtures exercise the real parser, HTTP checks, age/architecture
-// gates and file edits. No public services, Git mutations or GitHub mocks.
+// gates and file edits using the installed Docker Buildx client for OCI.
+// No public services, Git mutations or GitHub mocks.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,6 +19,7 @@ const hash=b=>'sha256:'+createHash('sha256').update(b).digest('hex');
 const oldDate='2026-10-01T00:00:00Z',mature='2026-11-01T00:00:00Z',young='2026-11-12T00:00:00Z';
 const oldChrome='156.0.8078.79-1~deb13u1',nextChrome='156.0.8078.90-1~deb13u2';
 const routes=new Map();let scenario={};let base;
+let registryEvidence={};
 function blob(obj) {
   const body=Buffer.from(JSON.stringify(obj)),digest=hash(body);
   return {body,digest};
@@ -26,16 +28,43 @@ function image(label,date,archs=['amd64','arm64']) {
   const platforms=archs.map(arch=>{
     const c=blob({created:scenario.armYoung && label==='new' && arch==='arm64'?young:date,architecture:arch,os:'linux',label});
     routes.set('/v2/IMAGE/blobs/'+c.digest,{body:c.body});
-    const m=blob({schemaVersion:2,config:{digest:c.digest}});
+    const m=blob({schemaVersion:2,mediaType:'application/vnd.oci.image.manifest.v1+json',config:{mediaType:'application/vnd.oci.image.config.v1+json',digest:c.digest,size:c.body.length},layers:[]});
     routes.set('/v2/IMAGE/manifests/'+m.digest,{body:m.body});
-    return {platform:{os:'linux',architecture:arch},digest:m.digest};
+    return {mediaType:'application/vnd.oci.image.manifest.v1+json',platform:{os:'linux',architecture:arch},digest:m.digest,size:m.body.length};
   });
-  const index=blob({schemaVersion:2,manifests:platforms});
+  const index=blob({schemaVersion:2,mediaType:'application/vnd.oci.image.index.v1+json',manifests:platforms});
   routes.set('/v2/IMAGE/manifests/'+index.digest,{body:index.body});
   return index;
 }
 const server=http.createServer((req,res)=>{
   const url=decodeURI(req.url);
+  if(url.startsWith('/registry-auth/token')) {
+    registryEvidence.tokenRequests++;
+    const query=new URL(req.url,base).searchParams;
+    assert.equal(query.get('service'),'registry.docker.io');
+    assert.match(query.get('scope'),/^repository:(library\/debian|debian-base|node):pull$/);
+    // No Basic credentials are supplied to this anonymous fixture route.
+    assert.equal(req.headers.authorization,undefined);
+    if(scenario.registryAuth==='denied') {
+      res.writeHead(401).end('sensitive-error-body fixture-token-secret https://example.invalid/blob?signature=fixture-signature-secret');return;
+    }
+    res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify({access_token:'fixture-bearer',expires_in:300}));return;
+  }
+  if(scenario.registryAuth && url.startsWith('/v2/') && req.headers.authorization!=='Bearer fixture-bearer') {
+    registryEvidence.challenges++;
+    const image=url.match(/^\/v2\/(.+)\/(?:manifests|blobs)\//)?.[1];
+    res.setHeader('WWW-Authenticate','Bearer realm="'+base+'/registry-auth/token",service="registry.docker.io"'+(image?',scope="repository:'+image+':pull"':''));
+    res.writeHead(401).end('authentication required');return;
+  }
+  if(url.startsWith('/signed-config/')) {
+    registryEvidence.redirects++;
+    const digest=new URL(req.url,base).pathname.split('/').at(-1);
+    if(scenario.signedDenied) {res.writeHead(403).end('fixture-token-secret');return;}
+    const config=routes.get('/v2/IMAGE/blobs/'+digest);
+    res.setHeader('Content-Type','application/vnd.oci.image.config.v1+json');
+    res.setHeader('Content-Length',config.body.length);res.end(req.method==='HEAD'?undefined:config.body);return;
+  }
   if(url.includes('/Packages.xz')) {
     const arch=url.includes('binary-amd64')?'amd64':'arm64';
     const versions=[...(scenario.vanished?[]:[oldChrome]),nextChrome,'157.0.1.1-1~deb13u1'];
@@ -59,14 +88,26 @@ const server=http.createServer((req,res)=>{
   if(url.endsWith('.mod')) {res.end('module github.com/docker/sandbox-kit-spec/v3\ngo 1.26.0\n');return;}
   const key=url.replace(/\/v2\/(?:library\/debian|debian-base|node)\//,'/v2/IMAGE/');
   const r=routes.get(key);
-  if(r) {res.end(r.body);return;}
+  if(r) {
+    if(scenario.signedConfig && url.includes('/blobs/')) {
+      res.setHeader('Location',base+'/signed-config/'+url.split('/').at(-1)+'?signature=fixture-signature-secret');
+      res.writeHead(307).end();return;
+    }
+    let body=r.body;
+    if(scenario.corruptConfig && url.includes('/blobs/') || scenario.corruptPlatform && url.includes('/manifests/sha256:') && JSON.parse(body).config)
+      body=Buffer.from(JSON.stringify({...JSON.parse(body),corrupted:true}));
+    const document=JSON.parse(body);
+    res.setHeader('Content-Type',document.mediaType || 'application/vnd.oci.image.config.v1+json');
+    res.setHeader('Docker-Content-Digest',hash(body));res.setHeader('Content-Length',body.length);
+    res.end(req.method==='HEAD'?undefined:body);return;
+  }
   res.writeHead(404).end('missing fixture '+url);
 });
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
 base='http://127.0.0.1:'+server.address().port;
 const options={now:'2026-11-13T00:00:00Z',debianBase:base,npmBase:base,goBase:base,dockerBase:base,dhiBase:base};
 function setup(config={}) {
-  scenario=config;routes.clear();
+  scenario=config;routes.clear();registryEvidence={challenges:0,tokenRequests:0,redirects:0};
   const old=image('old',oldDate);
   const next=image('new',config.young?young:mature,config.ociSingle?['amd64']:undefined);
   for(const tag of ['trixie','trixie-dev','24-debian13-dev']) routes.set('/v2/IMAGE/manifests/'+tag,{body:next.body});
@@ -225,6 +266,28 @@ try {
     assert.equal(spawned.report.outcome,'failure');
     assert.deepEqual(bytes(spawned.root),spawned.before);
   }
+  // Real Buildx resolver, not a Docker mock: follow a Bearer challenge to the
+  // advertised realm and a signed config redirect. No direct /token prefetch.
+  spawned=await cli({registryAuth:'public',signedConfig:true});
+  assert.equal(spawned.report.outcome,'update',spawned.summary);
+  assert.ok(registryEvidence.challenges>0);
+  assert.ok(registryEvidence.tokenRequests>0);
+  assert.ok(registryEvidence.redirects>0);
+  // Auth refusal and signed-redirect errors are sanitized, fail closed, and
+  // never get classified as missing current pins or cause partial writes.
+  for(const config of [
+    {registryAuth:'denied'},
+    {registryAuth:'public',signedConfig:true,signedDenied:true},
+    {corruptConfig:true},
+    {corruptPlatform:true},
+  ]) {
+    spawned=await cli(config);
+    assert.equal(spawned.report.outcome,'failure',spawned.summary);
+    assert.match(spawned.summary,/OCI/);
+    assert.doesNotMatch(spawned.summary,/fixture-token-secret|fixture-signature-secret|fixture-bearer|sensitive-error-body/);
+    assert.doesNotMatch(spawned.summary,/MIRROR DISAPPEARANCE/);
+    assert.deepEqual(bytes(spawned.root),spawned.before);
+  }
   // Workflow guards use real files and reject each prohibited convention.
   for(const body of [
     'on:\n  pull_request:\njobs:\n',
@@ -255,7 +318,7 @@ esac
     const expected=out==='existing-dir'?cwd+'/existing-dir/kit-tck':path.resolve(cwd,out);
     assert.equal(fs.readFileSync(expected,'utf8'),'fixture');
   }
-  console.log('maintenance: imported and spawned-CLI dry-run/no-change/update/failure, current-pin retention, policy, workflow guards and relative installer fixtures passed');
+  console.log('maintenance: imported and spawned-CLI dry-run/no-change/update/failure, current-pin retention, real Buildx auth/redirect/digest checks, workflow guards and relative installer fixtures passed');
 } finally {
   await new Promise(r=>server.close(r));fs.rmSync(dir,{recursive:true,force:true});
 }
