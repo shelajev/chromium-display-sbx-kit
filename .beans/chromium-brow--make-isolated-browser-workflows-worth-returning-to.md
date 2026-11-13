@@ -1,0 +1,19 @@
+---
+# chromium-brow
+title: Make isolated browser workflows worth returning to
+status: todo
+type: epic
+priority: high
+created_at: 2026-11-13T13:35:23Z
+updated_at: 2026-11-13T13:35:23Z
+---
+
+Oleg selected Herdr on 2026-11-13. Deliver a reliable Chromium display kit,
+proxy/profile security contract, and practical Teams/expense workflow setups.
+See BROWSER-ROADMAP.md for ordered tasks, source observations, sequencing and
+the first work package's task review contract. Children: fres, disp, prox, secr,
+life, help, updt, gpua, ship, team, expe, file, pilt (prefix chromium-).
+
+Plan ready; no implementation run or release accepted. Start with fres/disp and
+affected life behavior, then proxy/security, then workflow validation. Each
+Herdr run needs its own central task record; this epic is not a run receipt.
