@@ -35,6 +35,8 @@ error. Set `SBX_WAYLAND_SOCKET=/absolute/path` for a strict compositor override
 (invalid overrides fail), or `SBX_CHROME_HEADLESS=1` to force headless operation.
 Plain `sbx-chromium --headless` and version queries bypass display discovery.
 
+Chromium negotiates GPU use by default. With no render device exposed inside the sandbox, it uses software rendering. That fallback has been tested; Mac/VFIO hardware acceleration has not. To force software rendering regardless of the available device, set `SBX_CHROME_DISABLE_GPU=1` in the browser's guest launch environment before starting or restarting Chromium. Inspect the selected path in `chrome://gpu` or the GPU fields returned by `SystemInfo.getInfo` through the Chrome DevTools Protocol (CDP).
+
 Use `sbx-chrome diag` for safe metadata (mode, socket capabilities, managed PIDs,
 CDP health, target count and lock presence). It excludes URLs, titles, cookies
 and page content. Do not export profile files or browser logs as diagnostics.

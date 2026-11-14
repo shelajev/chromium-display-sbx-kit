@@ -32,12 +32,33 @@ fi
 # 2. The browser, and the version the descriptor claims.
 sbx-chromium --version | tee /dev/stderr | grep -q "^Chromium $CHROMIUM_VERSION "
 
-# 3. A one-shot headless render with real text, so fonts must resolve.
-printf '<html><body style="font:48px sans-serif">sbx-chromium renders text</body></html>' > page.html
-sbx-chromium --headless --screenshot="$PWD/shot.png" --window-size=800,200 "file://$PWD/page.html" 2>chromium.log \
+# 3. A one-shot headless render with real text, so fonts must resolve. The
+# page lays the text out and rasterises it to a canvas, then reports numbers
+# into the DOM: with no usable font both widths and the ink count are 0.
+cat > page.html <<'HTML'
+<html><body style="margin:0;font:48px sans-serif"><span id="t">sbx-chromium renders text</span><pre id="r"></pre><script>
+const t = document.getElementById('t'), box = t.getBoundingClientRect();
+const c = document.createElement('canvas'); c.width = 800; c.height = 80;
+const g = c.getContext('2d'), text = t.textContent;
+g.fillStyle = '#fff'; g.fillRect(0, 0, 800, 80);
+g.fillStyle = '#000'; g.font = '48px sans-serif'; g.fillText(text, 0, 60);
+const px = g.getImageData(0, 0, 800, 80).data; let ink = 0;
+for (let i = 0; i < px.length; i += 4) if (px[i] < 128) ink++;
+const width = f => { g.font = f; return g.measureText(text).width; };
+document.getElementById('r').textContent = 'RENDER ' + JSON.stringify({w: box.width, h: box.height,
+  size: getComputedStyle(t).fontSize, ink, sans: width('48px sans-serif'), mono: width('48px monospace')});
+</script></body></html>
+HTML
+sbx-chromium --headless --dump-dom "file://$PWD/page.html" 2>chromium.log > dom.html \
   || { cat chromium.log; exit 1; }
-test "$(wc -c < shot.png)" -gt 4000
-sbx-chromium --headless --dump-dom "file://$PWD/page.html" 2>/dev/null | grep -q 'renders text'
+grep -q 'renders text' dom.html
+sed -n 's/.*RENDER \({[^}]*}\).*/\1/p' dom.html > render.json
+"$PREFIX/node/bin/node" -e '
+  const r = JSON.parse(require("node:fs").readFileSync("render.json", "utf8"));
+  console.error("one-shot text render:", JSON.stringify(r));
+  if (!(r.w > 300 && r.h > 30 && r.size === "48px")) throw new Error("text did not lay out");
+  if (!(r.ink > 1000)) throw new Error("text glyphs did not rasterise");
+  if (!(r.sans > 0 && r.mono > 0 && r.sans !== r.mono)) throw new Error("sans-serif and monospace did not resolve to distinct fonts");'
 
 "$PREFIX/node/bin/node" /tmp/test/display-lifecycle-test.mjs
 
@@ -60,6 +81,10 @@ sbx-chrome status | grep -q "Chrome/$CHROMIUM_VERSION"
 "$PREFIX/node/bin/node" /tmp/test/mcp-test.mjs "$PREFIX/bin/sbx-browser-mcp"
 sbx-chrome stop
 "$PREFIX/node/bin/node" /tmp/test/port-ownership-test.mjs
+# GPU policy on this base, which has no render device: Chromium's default
+# negotiation and the explicit software override both render correctly.
+"$PREFIX/node/bin/node" /tmp/test/gpu-fallback-test.mjs "$PREFIX/bin/sbx-chrome" default headless
+SBX_CHROME_DISABLE_GPU=1 "$PREFIX/node/bin/node" /tmp/test/gpu-fallback-test.mjs "$PREFIX/bin/sbx-chrome" software headless
 
 # 6. Registration: only agents present, idempotent, user entries preserved.
 mkdir -p fakebin "$HOME/.codex"

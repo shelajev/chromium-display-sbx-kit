@@ -108,6 +108,39 @@ exec \"${process.execPath}\" \"$@\"
   try { await exec(`${prefix}/bin/sbx-chromium`, ['--dump-dom','about:blank'], {env:{...env,LD_LIBRARY_PATH:'',SBX_WAYLAND_SOCKET:`${display}/wayland-0`}}); }
   catch(e) { assert.equal(e.code,1);assert.match(e.stdout,/--ozone-platform=wayland/);assert.equal(e.stderr,''); }
   fs.unlinkSync(nodePath);fs.symlinkSync(process.execPath,nodePath);
+  // GPU policy: no mode forces software rendering by default; Chromium
+  // negotiates. SBX_CHROME_DISABLE_GPU=1 forces it everywhere; caller flags
+  // pass through untouched.
+  const launch = async (args, extra) => {
+    const e = await exec(`${prefix}/bin/sbx-chromium`, args, {env:{...env,...extra}}).then(() => assert.fail('fake browser exits 1'), e => e);
+    assert.equal(e.code,1); assert.equal(e.stderr,''); return e.stdout.trim().split('\n');
+  };
+  const count = (argv, flag) => argv.filter(a => a === flag).length;
+  const modes = {wayland:[[], {SBX_WAYLAND_SOCKET:`${display}/wayland-0`}], x11:[[], {...xenv,DISPLAY:':0'}], headless:[[], {SBX_CHROME_HEADLESS:'1'}], 'headless-arg':[['--headless'], {}]};
+  for (const [mode, [args, extra]] of Object.entries(modes)) {
+    const ozone = `--ozone-platform=${mode.replace('-arg','')}`;
+    for (const value of [undefined, '', '0', 'true', '1']) {
+      const argv = await launch([...args, 'about:blank'], value === undefined ? extra : {...extra, SBX_CHROME_DISABLE_GPU:value});
+      const forced = value === '1' ? 1 : 0;
+      assert.equal(count(argv,ozone),1,`${mode} ${value}`);
+      assert.equal(count(argv,'--disable-gpu'),forced,`${mode} ${value}`);
+      assert.equal(count(argv,'--disable-gpu-compositing'),forced,`${mode} ${value}`);
+      assert.equal(count(argv,'--no-proxy-server'),1); assert.equal(count(argv,'--enable-features=WebMCP'),1);
+      assert.equal(argv.at(-1),'about:blank');
+    }
+    const caller = await launch([...args, '--disable-gpu', '--enable-features=Foo', '--use-angle=swiftshader', 'about:blank'], extra);
+    assert.equal(count(caller,'--disable-gpu'),1); assert.equal(count(caller,'--disable-gpu-compositing'),0);
+    assert.equal(count(caller,'--use-angle=swiftshader'),1);
+    assert.deepEqual(caller.filter(a => a.startsWith('--enable-features=')),['--enable-features=WebMCP,Foo']);
+  }
+  // sbx-chrome forwards the caller's override to the browser it launches.
+  for (const [value, forced] of [['1',true],[undefined,false]]) {
+    const r = await chrome(['start'], {SBX_CHROME_HEADLESS:'1', ...(value ? {SBX_CHROME_DISABLE_GPU:value} : {})});
+    assert.match(r.stderr,/exited before CDP readiness/); // fake browser
+    const logged = fs.readFileSync(`${env.XDG_STATE_HOME}/sbx-chromium/chrome.log`,'utf8').split('\n');
+    assert.equal(logged.includes('--disable-gpu') && logged.includes('--disable-gpu-compositing'),forced);
+    assert.ok(logged.includes('--ozone-platform=headless'));
+  }
   fs.mkdirSync(env.CHROME_USER_DATA_DIR,{recursive:true});
   for (const owner of ['old-container-999999',`${os.hostname()}-999999`]) {
     fs.symlinkSync(owner,`${env.CHROME_USER_DATA_DIR}/SingletonLock`);

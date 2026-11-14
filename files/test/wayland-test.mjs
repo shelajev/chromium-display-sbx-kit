@@ -38,6 +38,11 @@ try {
   assert.equal(d.displayCandidates.find(c=>c.path===`${runtime}/wayland-0`).kind,'clipboard-only');
   await exec(process.execPath,[path.join(path.dirname(fileURLToPath(import.meta.url)),'mcp-test.mjs'),`${prefix}/bin/sbx-browser-mcp`],{env,maxBuffer:1024*1024});
   await chrome(['stop']);
+  // GPU policy on a real compositor with no render device: default
+  // negotiation and the explicit software override both render.
+  const gpu=path.join(path.dirname(fileURLToPath(import.meta.url)),'gpu-fallback-test.mjs');
+  for (const [policy,extra] of [['default',{}],['software',{SBX_CHROME_DISABLE_GPU:'1'}]])
+   console.log((await exec(process.execPath,[gpu,`${prefix}/bin/sbx-chrome`,policy,'wayland'],{env:{...env,...extra}})).stdout.trim());
   weston.kill('SIGTERM');await new Promise(r=>weston.once('exit',r));weston=null;
   console.log(`real Ozone Wayland + CDP/MCP/WebMCP/restart: ok (${socket.startsWith('/run/display')?'read-only forwarded directory':'wayland-1'})`);
  }

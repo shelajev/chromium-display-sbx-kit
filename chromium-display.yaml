@@ -137,7 +137,7 @@ capabilities:
         - command: ["/opt/sbx-chromium/bin/sbx-chrome", "--if-display"]
           user: agent
           background: true
-          env: [WAYLAND_DISPLAY, DISPLAY, XDG_RUNTIME_DIR, SBX_WAYLAND_SOCKET, SBX_CHROME_HEADLESS]
+          env: [WAYLAND_DISPLAY, DISPLAY, XDG_RUNTIME_DIR, SBX_WAYLAND_SOCKET, SBX_CHROME_HEADLESS, SBX_CHROME_DISABLE_GPU]
           description: Open Chromium on the forwarded display
 
   # MIGRATION NOTE: v2's agentContext block, moved to a staged file and

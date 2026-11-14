@@ -46,8 +46,13 @@ if [ "$headless" = 1 ] || [ "$SBX_OZONE" = headless ]; then
   [ "$headless" = 1 ] || set -- --headless "$@"
   set -- --ozone-platform=headless "$@"
 else
-  # No GPU is forwarded; software compositing is what works on the display.
-  set -- --ozone-platform="$SBX_OZONE" --disable-gpu --disable-gpu-compositing "$@"
+  set -- --ozone-platform="$SBX_OZONE" "$@"
+fi
+# GPU use is Chromium's own decision: it probes the render device it is given
+# and falls back to software compositing when there is none, as in a sandbox
+# without GPU forwarding. SBX_CHROME_DISABLE_GPU=1 forces the software path.
+if [ "${SBX_CHROME_DISABLE_GPU:-0}" = 1 ]; then
+  set -- --disable-gpu --disable-gpu-compositing "$@"
 fi
 
 exec "$PREFIX/chromium/chromium" \
