@@ -17,3 +17,9 @@ Navan handoff is historical evidence, never public example data.
 Accept accurate prepared report and preserved evidence, restartable browser
 handoff, visible unresolved fields and no accidental financial submission.
 Submitting is a separate explicit user action. Depends on foundation/ship/file.
+
+Gate setup work on mature browser handoff plus accepted profile/secret-storage,
+proxy trust/injection and file boundaries. Keep a reproducible synthetic expense
+system/receipt fixture independent of a real service; human authentication and
+account scope require a later explicit authorization. No public expense-site
+login, account implementation or financial submission is authorized now.

@@ -18,3 +18,10 @@ Accept synthetic reproducible journey and, when a specific account/tenant is
 authorized, real Teams handoff evidence. Keep synthetic and real results distinct.
 No message sends, new credentials or broad account access implied. Depends on
 foundation/ship; coordinate attachment needs with file.
+
+Use Teams web as a fallback when a native integration is unavailable or lacks
+the needed workflow. Start only after kit maturity, profile/secret-storage and
+proxy trust/injection boundaries are accepted. Human performs authentication
+and any desktop interaction; no login, tenant access or implementation is
+currently authorized by this backlog entry. Keep the synthetic fixture runnable
+without an actual Teams account and make the later account authorization explicit.
