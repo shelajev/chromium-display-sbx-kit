@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-15T16:13:00Z
+updated_at: 2026-11-15T16:22:00Z
 ---
 
 Epic chromium-brow; order 3. Launcher currently unsets proxy variables and
@@ -146,3 +146,15 @@ QC's parser-proof.mjs, which asserts the old defect, now fails at that
 assertion. Codex fresh, legacy and repeat output SHA256 match QC's recorded
 values, so the round-2 Codex runs stand. CI script checks passed. No kit
 build was run this round, and nothing was pruned.
+
+Round 9 (0d4a61f), QC round-8 F3. Codex edits are refused, with names-to-add
+guidance, when any statement could define the server, its command or its
+env_vars another way: quoted or dotted keys, a non-array env_vars, a
+duplicate table or sub-table, [mcp_servers] dotted or inline definitions,
+or a top-level mcp_servers key. A duplicate key can no longer be written.
+At 635ef95 all five QC-style fixtures were written; now all are preserved.
+register-test is 34/34, and tomllib validates every planned output and
+input. QC's round-7 adversarial (7/7), round-8 adjacent-key probe and its
+validator (2/2) pass on scratch copies. Codex fresh, legacy and repeat
+SHA256 match QC's values, so the round-2 Codex runs stand. CI checks
+passed. No kit build was run and Docker was not touched.
