@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-15T15:36:00Z
+updated_at: 2026-11-15T15:45:00Z
 ---
 
 Epic chromium-brow; order 3. Launcher currently unsets proxy variables and
@@ -76,3 +76,16 @@ folder trust; the guest CA file still supplies trust. Cursor is untested
 because no official build was 7 days old; its docs are silent. These limits
 are scoped in the README. amd64 and native Mac host runs were not repeated.
 Evidence is under /home/agent/crew/evidence (outside the repo).
+
+Round 2, after the leader's source audit (6fb0a69, 995c9cb). Broken-config
+messages no longer quote the file: Node 24's JSON.parse message echoed the
+input. A synthetic-marker regression checks the JSON and Codex paths.
+Ownership comes from the command only: sbx-browser-mcp, or the v2
+chrome-devtools-mcp, run directly or through npx. Fork paths and mentions in
+comments, env or notes stay user-owned and byte-unchanged; mutants of both
+fixes fail register-test. The documented CHROME_REMOTE_DEBUGGING_PORT now
+goes to Codex and to the startup hook (19 names). CHROME_USER_DATA_DIR stays
+out because it is undocumented and its default derives from HOME. At 995c9cb:
+cold arm64 build, smoke and proxy-ca passed; register-test 23/23; kit-tck
+19/19; audit and CI checks passed. Codex 0.166 fresh, legacy and reuse runs,
+plus the new custom-port case, passed with client tool calls through the proxy.
