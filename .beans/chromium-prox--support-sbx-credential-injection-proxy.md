@@ -1,7 +1,7 @@
 ---
 # chromium-prox
 title: Support SBX credential injection proxy
-status: completed
+status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
@@ -38,3 +38,10 @@ workflow-readiness checks, owned by chromium-team before real account use.
 Profile/secret boundaries remain chromium-secr; proxy support does not hide
 website sessions from the same-user agent. Native clipboard and Mac/VFIO
 hardware GPU are separate open work. No real website credential was used.
+
+Reopened 2026-11-15 for registered-client environment verification. The native
+checks above launched the real MCP server directly. Exact Codex0.166 source
+filters stdio MCP child environments; the current owned registration has no
+explicit env_vars. Determine actual client behavior, then repair the narrow
+environment contract without persisting values or forwarding unrelated secrets.
+Track bounded execution centrally as ai-contrib-benv / chromium-agent-env.
