@@ -92,38 +92,28 @@ function mergeJson(file, key, entry, isOurs) {
   if (doc[key] !== undefined && !isObject(doc[key])) return `left alone: ${file} has a '${key}' that is not an object`;
   const servers = (doc[key] ??= {});
   const current = servers[NAME];
-  if (current && JSON.stringify(current) === JSON.stringify(entry)) return 'already registered';
-  if (current && !isOurs(current)) return `left alone: ${file} already has a different '${NAME}' entry`;
+  // An entry already running the managed command is kept exactly as it is,
+  // with any env or settings the user added; JSON entries need nothing new.
+  if (current !== undefined && isOurs(current)) return 'already registered';
+  if (current !== undefined) return `left alone: ${file} already has a different '${NAME}' entry`;
   servers[NAME] = entry;
   writeAtomic(file, `${JSON.stringify(doc, null, 2)}\n`);
   return `registered in ${file}`;
 }
 
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
-// An entry is this kit's only by what it runs: this kit's server, or the v2
-// kit's `npx chrome-devtools-mcp --browser-url=…` / a direct
-// chrome-devtools-mcp, so upgrading replaces those instead of leaving them
-// behind. Comments, env and other keys never decide it. For npx, the package
-// is the first argument after npx's own -y/--yes; any other option, or any
-// other package first, is someone else's invocation and is left alone.
-const base = p => typeof p === 'string' ? p.split('/').pop() : '';
-export function isOurCommand(command, args = []) {
-  const name = base(command);
-  if (name === 'sbx-browser-mcp' || name === 'chrome-devtools-mcp') return true;
-  if (name !== 'npx' || !Array.isArray(args)) return false;
-  const target = args.find(a => a !== '-y' && a !== '--yes');
-  return typeof target === 'string' && /^chrome-devtools-mcp(@[^\s/]*)?$/.test(target);
-}
-// A Codex entry is ours only when its command is exactly the managed command
-// this run writes, or exactly a value an earlier release wrote. 2.0.0 through
-// 2.0.2 all wrote /opt/sbx-chromium/bin/sbx-browser-mcp. Any other value — a
-// custom path with the same file name, a direct chrome-devtools-mcp, an npx
-// entry — is the user's and is never touched.
-const CODEX_LEGACY_COMMANDS = Object.freeze(['/opt/sbx-chromium/bin/sbx-browser-mcp']);
-export const isOurCodexCommand = (value, managed) =>
-  typeof value === 'string' && (value === managed || CODEX_LEGACY_COMMANDS.includes(value));
-const ownsCommandEntry = e => isObject(e) && isOurCommand(e.command, e.args);
-const ownsOpencodeEntry = e => isObject(e) && Array.isArray(e.command) && isOurCommand(e.command[0], e.command.slice(1));
+// An entry is this kit's only when it runs exactly the managed command this
+// run writes, or exactly the value every earlier release wrote: 2.0.0 through
+// 2.0.2 registered /opt/sbx-chromium/bin/sbx-browser-mcp with every agent.
+// Anything else — a custom path with the same file name, a direct
+// chrome-devtools-mcp, an npx entry — is the user's and is never touched.
+// Comments, env and other keys never decide it.
+const LEGACY_COMMANDS = Object.freeze(['/opt/sbx-chromium/bin/sbx-browser-mcp']);
+export const isOurCommand = (value, managed) =>
+  typeof value === 'string' && (value === managed || LEGACY_COMMANDS.includes(value));
+const ownsCommandEntry = managed => e => isObject(e) && isOurCommand(e.command, managed);
+// OpenCode takes the command and its arguments as one array; ours has none.
+const ownsOpencodeEntry = managed => e => isObject(e) && Array.isArray(e.command) && e.command.length === 1 && isOurCommand(e.command[0], managed);
 
 // ── Codex: TOML, edited in place without a TOML library ──────────────────────
 // Only the lines of our own table are ever touched; everything else in the
@@ -174,7 +164,7 @@ export function planCodex(text, command) {
   let end = lines.findIndex((l, i) => i > start && ANY_HEADER.test(l.replace(/\r$/, '')));
   if (end < 0) end = lines.length;
   const cmdRow = lines.findIndex((l, i) => i > start && i < end && COMMAND_KEY.test(l));
-  if (cmdRow < 0 || !isOurCodexCommand(tomlString(COMMAND_KEY.exec(lines[cmdRow])[1]), command)) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
+  if (cmdRow < 0 || !isOurCommand(tomlString(COMMAND_KEY.exec(lines[cmdRow])[1]), command)) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
 
   // Ours, possibly from a release that did not pass the environment through.
   const envRow = lines.findIndex((l, i) => i > start && i < end && ENV_VARS_KEY.test(l));
@@ -223,25 +213,25 @@ export function agents(command, env) {
       present: () => onPath('claude', env.PATH),
       // User scope: top-level mcpServers in ~/.claude.json.
       run: () => mergeJson(path.join(home, '.claude.json'), 'mcpServers',
-        { type: 'stdio', command, args: [], env: {} }, ownsCommandEntry),
+        { type: 'stdio', command, args: [], env: {} }, ownsCommandEntry(command)),
     },
     {
       name: 'gemini',
       present: () => onPath('gemini', env.PATH),
       run: () => mergeJson(path.join(home, '.gemini', 'settings.json'), 'mcpServers',
-        { command, args: [] }, ownsCommandEntry),
+        { command, args: [] }, ownsCommandEntry(command)),
     },
     {
       name: 'cursor',
       present: () => onPath('cursor-agent', env.PATH),
       run: () => mergeJson(path.join(home, '.cursor', 'mcp.json'), 'mcpServers',
-        { command, args: [] }, ownsCommandEntry),
+        { command, args: [] }, ownsCommandEntry(command)),
     },
     {
       name: 'opencode',
       present: () => onPath('opencode', env.PATH),
       run: () => mergeJson(path.join(home, '.config', 'opencode', 'opencode.json'), 'mcp',
-        { type: 'local', command: [command], enabled: true }, ownsOpencodeEntry),
+        { type: 'local', command: [command], enabled: true }, ownsOpencodeEntry(command)),
     },
     {
       name: 'codex',
