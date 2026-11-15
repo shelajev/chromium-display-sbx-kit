@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-15T15:51:00Z
+updated_at: 2026-11-15T15:57:00Z
 ---
 
 Epic chromium-brow; order 3. Launcher currently unsets proxy variables and
@@ -101,3 +101,13 @@ variables. Quick-start examples name 2.0.3. Registration output for fresh
 and legacy entries is identical to 995c9cb, so the round-2 Codex 0.166 runs
 stand. At d68a43e: cold arm64 build and smoke passed (register-test 26/26,
 proxy-ca); kit-tck 19/19, audit and CI checks passed.
+
+Round 5 (dedbed4, 4c132d2). Git history shows every release wrote only
+`command = "/opt/sbx-chromium/bin/sbx-browser-mcp"` to Codex, so Codex now
+owns only the sbx-browser-mcp command. User chrome-devtools-mcp entries stay
+byte-unchanged. JSON clients still also own chrome-devtools-mcp and the npx
+legacy form; this was reported, not changed. Generated Codex config for
+fresh, legacy and repeated runs is byte-identical to 995c9cb, so the round-2
+Codex 0.166 runs stand. The leader's reviewed copy is applied verbatim and
+checked against the code. At 4c132d2, with the cache kept: build, smoke,
+proxy-ca, register-test 27/27, kit-tck 19/19, audit and CI checks passed.
