@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-15T15:45:00Z
+updated_at: 2026-11-15T15:51:00Z
 ---
 
 Epic chromium-brow; order 3. Launcher currently unsets proxy variables and
@@ -89,3 +89,15 @@ out because it is undocumented and its default derives from HOME. At 995c9cb:
 cold arm64 build, smoke and proxy-ca passed; register-test 23/23; kit-tck
 19/19; audit and CI checks passed. Codex 0.166 fresh, legacy and reuse runs,
 plus the new custom-port case, passed with client tool calls through the proxy.
+
+Round 3 (3e75fba..d68a43e). A malformed quoted Codex env_vars name now fails
+only that agent, with a file-path message; other agents still register. No
+content leak had been shown on that path. npx entries count as the kit's only
+when the first package after -y/--yes is chrome-devtools-mcp. The original
+1.x spec was not available, so the legacy form comes from the old code comment.
+Docs now say attaching never transfers the MCP environment into a running
+browser, and a missing-proxy refusal does not prove the agent dropped the
+variables. Quick-start examples name 2.0.3. Registration output for fresh
+and legacy entries is identical to 995c9cb, so the round-2 Codex 0.166 runs
+stand. At d68a43e: cold arm64 build and smoke passed (register-test 26/26,
+proxy-ca); kit-tck 19/19, audit and CI checks passed.
