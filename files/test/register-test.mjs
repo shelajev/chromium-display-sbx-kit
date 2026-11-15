@@ -170,6 +170,51 @@ test('Codex entries running any other command stay byte-unchanged', () => {
   } finally { s.cleanup(); }
 });
 
+// A sample entry inside a multi-line string is text, not configuration.
+const SAMPLE = (q) => `developer_instructions = ${q}\nExample:\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\n${q}\n`;
+
+test('a sample entry inside a multi-line string is never edited or taken for the real one', () => {
+  for (const q of ["'''", '"""']) {
+    // The real entry runs the user's own server: nothing changes.
+    const user = `${SAMPLE(q)}\n[mcp_servers.chrome-devtools]\ncommand = "/usr/bin/user-server"\n`;
+    assert.deepEqual(planCodex(user, CMD), { text: null, result: "left alone: the existing 'chrome-devtools' entry runs a different command" }, q);
+    // The real entry is the kit's legacy one: it is upgraded, the string is not.
+    const owned = `${SAMPLE(q)}\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nstartup_timeout_sec = 30\n`;
+    const r = planCodex(owned, CMD);
+    assert.equal(r.result, 'upgraded: added env_vars', q);
+    assert.equal(r.text, `${SAMPLE(q)}\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\n${ENV_LINE}\nstartup_timeout_sec = 30\n`, q);
+    // Only the sample exists: a real table is appended after the string.
+    const fresh = planCodex(SAMPLE(q), CMD);
+    assert.equal(fresh.result, 'registered', q);
+    assert.ok(fresh.text.startsWith(SAMPLE(q)) && fresh.text.endsWith(`${ENV_LINE}\n`), q);
+  }
+});
+
+test('a file whose strings cannot be followed with certainty is left unchanged with guidance', () => {
+  for (const before of [
+    `developer_instructions = '''\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\n`,          // unterminated
+    `x = """a""""\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\n`,                             // closing quotes run on
+  ]) {
+    const { text, result } = planCodex(before, CMD);
+    assert.equal(text, null, before);
+    assert.match(result, /^left alone: a multi-line or unterminated string makes the file uncertain to edit; make sure \[mcp_servers\.chrome-devtools\] lists env_vars = \["HTTP_PROXY"/);
+  }
+});
+
+test('names that appear only in a comment are not forwarded and never count as registered', () => {
+  const proxy = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
+  const rest = ENV_NAMES.filter(n => !proxy.includes(n));
+  const before = `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = [\n  # still to add: ${proxy.map(n => `"${n}"`).join(', ')}\n  ${rest.map(n => `"${n}"`).join(', ')}\n]\n`;
+  const { text, result } = planCodex(before, CMD);
+  assert.equal(text, null);
+  assert.equal(result, `left alone: the 'chrome-devtools' env_vars uses a custom layout; add ${proxy.join(', ')} to it so the browser keeps the sandbox proxy`);
+  // Every name present as an element, plus a comment: still guidance, not "already registered".
+  const full = `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = [ # mine\n  ${ENV_NAMES.map(n => `"${n}"`).join(', ')}\n]\n`;
+  const r = planCodex(full, CMD);
+  assert.equal(r.text, null);
+  assert.match(r.result, /^left alone: .*custom layout; make sure each of HTTP_PROXY, .* is a plain entry in it/);
+});
+
 test('an unclosed env_vars array is a configuration error', () => {
   const before = `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = ["HTTP_PROXY",\n`;
   assert.throws(() => planCodex(before, CMD), e => e instanceof RegisterError && /not closed/.test(e.message));

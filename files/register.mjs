@@ -130,22 +130,68 @@ function tomlString(quoted) {
 }
 const tomlArray = names => `[${names.map(n => JSON.stringify(n)).join(', ')}]`;
 
-// From `[` at lines[row][col], the position just after the matching `]`,
-// skipping brackets inside strings and comments. Arrays of strings and inline
-// tables are what Codex accepts for env_vars; neither nests further arrays.
-function arrayEnd(lines, row, col) {
-  let quote = null;
+// Which lines begin at statement level: not inside a string (multi-line
+// ''' and """ included) and not continuing a comment. Only those can hold a
+// table header, `command` or `env_vars`, so an example inside, say,
+// developer_instructions is never taken for the real entry. null when the
+// text cannot be followed with certainty (an unterminated string, or a
+// closing ''' / """ followed by more quotes); the caller then edits nothing.
+function statementLines(text) {
+  const starts = [true];
+  let state = 'code';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\n') {
+      if (state === 'basic' || state === 'literal') return null;
+      if (state === 'comment') state = 'code';
+      starts.push(state === 'code');
+      continue;
+    }
+    if (state === 'code') {
+      if (ch === '#') state = 'comment';
+      else if (text.startsWith('"""', i)) { state = 'ml-basic'; i += 2; }
+      else if (text.startsWith("'''", i)) { state = 'ml-literal'; i += 2; }
+      else if (ch === '"') state = 'basic';
+      else if (ch === "'") state = 'literal';
+    } else if (state === 'basic' || state === 'ml-basic') {
+      if (ch === '\\') { if (text[i + 1] === '\n') starts.push(false); i++; }
+      else if (state === 'basic' && ch === '"') state = 'code';
+      else if (state === 'ml-basic' && text.startsWith('"""', i)) {
+        if (text[i + 3] === '"') return null;
+        state = 'code'; i += 2;
+      }
+    } else if (state === 'literal') {
+      if (ch === "'") state = 'code';
+    } else if (state === 'ml-literal' && text.startsWith("'''", i)) {
+      if (text[i + 3] === "'") return null;
+      state = 'code'; i += 2;
+    }
+  }
+  return state === 'code' || state === 'comment' ? starts : null;
+}
+
+// From `[` at lines[row][col]: where the array ends (just after its `]`) and
+// the quoted string elements outside comments. Comments, inline tables and
+// multi-line strings mark a layout this script neither rewrites nor trusts
+// for "already registered". null when the array is not closed.
+function scanArray(lines, row, col) {
+  let quote = null, token = '', custom = false;
+  const tokens = [];
   for (let r = row; r < lines.length; r++) {
     const line = lines[r];
     for (let c = r === row ? col + 1 : 0; c < line.length; c++) {
       const ch = line[c];
       if (quote) {
-        if (quote === '"' && ch === '\\') c++;
-        else if (ch === quote) quote = null;
-      } else if (ch === '"' || ch === "'") quote = ch;
-      else if (ch === '#') break;
-      else if (ch === ']') return { row: r, col: c + 1 };
+        token += ch;
+        if (quote === '"' && ch === '\\') token += line[++c] ?? '';
+        else if (ch === quote) { tokens.push(token); quote = null; }
+      } else if (line.startsWith('"""', c) || line.startsWith("'''", c)) return { custom: true, tokens, end: null };
+      else if (ch === '"' || ch === "'") { quote = ch; token = ch; }
+      else if (ch === '#') { custom = true; break; }
+      else if (ch === '{') custom = true;
+      else if (ch === ']') return { custom, tokens, end: { row: r, col: c + 1 } };
     }
+    if (quote) return null;  // a single-line string cannot span lines
   }
   return null;
 }
@@ -155,37 +201,43 @@ function arrayEnd(lines, row, col) {
 export function planCodex(text, command) {
   const fresh = `[mcp_servers.${NAME}]\ncommand = ${JSON.stringify(command)}\nstartup_timeout_sec = 30\nenv_vars = ${tomlArray(ENV_NAMES)}\n`;
   const lines = text.split('\n');
-  const start = lines.findIndex(l => CODEX_HEADER.test(l.replace(/\r$/, '')));
+  const atStatement = statementLines(text);
+  if (!atStatement) return { text: null, result: `left alone: a multi-line or unterminated string makes the file uncertain to edit; make sure [mcp_servers.${NAME}] lists env_vars = ${tomlArray(ENV_NAMES)}` };
+  const isLine = (re, i) => atStatement[i] && re.test(lines[i].replace(/\r$/, ''));
+  const start = lines.findIndex((_, i) => isLine(CODEX_HEADER, i));
   if (start < 0) {
     // A new table at the end of the file cannot capture keys that belong to
-    // another one.
+    // another one; the file ends outside any string (checked above).
     return { text: text + (text && !text.endsWith('\n') ? '\n' : '') + '\n' + fresh, result: 'registered' };
   }
-  let end = lines.findIndex((l, i) => i > start && ANY_HEADER.test(l.replace(/\r$/, '')));
+  let end = lines.findIndex((_, i) => i > start && isLine(ANY_HEADER, i));
   if (end < 0) end = lines.length;
-  const cmdRow = lines.findIndex((l, i) => i > start && i < end && COMMAND_KEY.test(l));
+  const cmdRow = lines.findIndex((_, i) => i > start && i < end && isLine(COMMAND_KEY, i));
   if (cmdRow < 0 || !isOurCommand(tomlString(COMMAND_KEY.exec(lines[cmdRow])[1]), command)) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
 
   // Ours, possibly from a release that did not pass the environment through.
-  const envRow = lines.findIndex((l, i) => i > start && i < end && ENV_VARS_KEY.test(l));
+  const envRow = lines.findIndex((_, i) => i > start && i < end && isLine(ENV_VARS_KEY, i));
   const cr = lines[cmdRow].endsWith('\r') ? '\r' : '';
   if (envRow < 0) {
     lines.splice(cmdRow + 1, 0, `env_vars = ${tomlArray(ENV_NAMES)}${cr}`);
     return { text: lines.join('\n'), result: 'upgraded: added env_vars' };
   }
   const open = lines[envRow].indexOf('[', ENV_VARS_KEY.exec(lines[envRow])[1].length);
-  const close = arrayEnd(lines, envRow, open);
-  if (!close) throw new RegisterError(`the env_vars array of '${NAME}' is not closed; fix the TOML and run sbx-browser-register again`);
-  const body = [lines[envRow].slice(open + 1, close.row === envRow ? close.col - 1 : undefined),
-    ...lines.slice(envRow + 1, close.row), ...(close.row === envRow ? [] : [lines[close.row].slice(0, close.col - 1)])].join('\n');
-  const quoted = [...body.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)].map(m => m[0]);
-  const names = quoted.map(tomlString);
+  const array = scanArray(lines, envRow, open);
+  if (!array) throw new RegisterError(`the env_vars array of '${NAME}' is not closed; fix the TOML and run sbx-browser-register again`);
+  const names = array.tokens.map(tomlString);
+  // Comments, inline tables ({name = …, source = …}) and multi-line strings
+  // are the user's own layout. Rewriting could lose a source or a note, and a
+  // name in a comment is not forwarded, so such an array is never "already
+  // registered": say what to add instead.
+  if (array.custom) {
+    const missing = ENV_NAMES.filter(n => !names.includes(n));
+    return { text: null, result: `left alone: the '${NAME}' env_vars uses a custom layout; ${missing.length ? `add ${missing.join(', ')} to it` : `make sure each of ${ENV_NAMES.join(', ')} is a plain entry in it`} so the browser keeps the sandbox proxy` };
+  }
   if (names.includes(null)) throw new RegisterError(`an env_vars name of '${NAME}' is not a plain quoted string; fix the TOML and run sbx-browser-register again`);
   const missing = ENV_NAMES.filter(n => !names.includes(n));
   if (!missing.length) return { text: null, result: 'already registered' };
-  // Inline tables ({name = …, source = …}) and comments are the user's own
-  // layout; rewriting them could lose a source or a note, so say what to add.
-  if (/[{#]/.test(body)) return { text: null, result: `left alone: the '${NAME}' env_vars uses a custom layout; add ${missing.join(', ')} to it so the browser keeps the sandbox proxy` };
+  const close = array.end;
   const merged = `${lines[envRow].slice(0, open)}${tomlArray([...names, ...missing])}${lines[close.row].slice(close.col)}`;
   lines.splice(envRow, close.row - envRow + 1, merged);
   return { text: lines.join('\n'), result: `upgraded: added ${missing.join(', ')} to env_vars` };
