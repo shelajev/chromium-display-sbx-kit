@@ -27,6 +27,11 @@ const NAME = 'chrome-devtools';
 //   display: WAYLAND_DISPLAY, XDG_RUNTIME_DIR, SBX_WAYLAND_SOCKET  wayland-probe.mjs discover();
 //            DISPLAY, SBX_CHROME_HEADLESS  display.sh sbx_detect_display()
 //   GPU:     SBX_CHROME_DISABLE_GPU  sbx-chromium
+//   port:    CHROME_REMOTE_DEBUGGING_PORT  sbx-browser-mcp, lifecycle.mjs (documented)
+// Deliberately absent: CHROME_USER_DATA_DIR, XDG_STATE_HOME and
+// SBX_CHROME_START_TIMEOUT (undocumented code controls; the default profile
+// and state paths derive from HOME, which Codex always passes), and loader or
+// credential variables.
 // Codex starts stdio MCP servers with a cleared environment plus a small core
 // set (HOME, PATH, locale, …, and CA bundle paths such as SSL_CERT_FILE), so
 // without `env_vars` the proxy variables never arrive and the browser refuses
@@ -36,7 +41,7 @@ export const ENV_NAMES = Object.freeze([
   'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
   'SSL_CERT_FILE', 'PROXY_CA_CERT_B64', 'SBX_PROXY_CA_FILE', 'SBX_PROXY_MODE',
   'WAYLAND_DISPLAY', 'DISPLAY', 'XDG_RUNTIME_DIR', 'SBX_WAYLAND_SOCKET',
-  'SBX_CHROME_HEADLESS', 'SBX_CHROME_DISABLE_GPU',
+  'SBX_CHROME_HEADLESS', 'SBX_CHROME_DISABLE_GPU', 'CHROME_REMOTE_DEBUGGING_PORT',
 ]);
 
 // A configuration this script will not change and the user has to fix.

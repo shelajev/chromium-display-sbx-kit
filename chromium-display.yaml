@@ -144,6 +144,8 @@ capabilities:
         # display.sh also finds the socket where sbx mounts it. The proxy and
         # CA variables are declared for the same reason: without them the
         # browser would refuse to start rather than bypass the sandbox proxy.
+        # The DevTools port is declared so the window and the MCP server agree
+        # on it when it is set.
         # register.mjs hands Codex the same names (ENV_NAMES, as env_vars) for
         # the MCP server; register-test.mjs keeps the two lists equal.
         - command: ["/opt/sbx-chromium/bin/sbx-chrome", "--if-display"]
@@ -151,7 +153,8 @@ capabilities:
           background: true
           env: [WAYLAND_DISPLAY, DISPLAY, XDG_RUNTIME_DIR, SBX_WAYLAND_SOCKET, SBX_CHROME_HEADLESS, SBX_CHROME_DISABLE_GPU,
                 HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY, http_proxy, https_proxy, all_proxy, no_proxy,
-                SSL_CERT_FILE, PROXY_CA_CERT_B64, SBX_PROXY_CA_FILE, SBX_PROXY_MODE]
+                SSL_CERT_FILE, PROXY_CA_CERT_B64, SBX_PROXY_CA_FILE, SBX_PROXY_MODE,
+                CHROME_REMOTE_DEBUGGING_PORT]
           description: Open Chromium on the forwarded display
 
   # MIGRATION NOTE: v2's agentContext block, moved to a staged file and

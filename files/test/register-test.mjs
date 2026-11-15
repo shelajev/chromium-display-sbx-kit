@@ -47,7 +47,10 @@ test('allowlist is names only, unique, and matches the descriptor startup hook',
   for (const n of ENV_NAMES) assert.match(n, /^[A-Za-z_][A-Za-z0-9_]*$/);
   assert.equal(new Set(ENV_NAMES).size, ENV_NAMES.length);
   for (const n of ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'no_proxy', 'PROXY_CA_CERT_B64', 'SBX_PROXY_MODE',
-    'WAYLAND_DISPLAY', 'SBX_CHROME_HEADLESS', 'SBX_CHROME_DISABLE_GPU']) assert.ok(ENV_NAMES.includes(n), n);
+    'WAYLAND_DISPLAY', 'SBX_CHROME_HEADLESS', 'SBX_CHROME_DISABLE_GPU', 'CHROME_REMOTE_DEBUGGING_PORT']) assert.ok(ENV_NAMES.includes(n), n);
+  // Undocumented code controls, loader and credential variables stay out.
+  for (const n of ['CHROME_USER_DATA_DIR', 'XDG_STATE_HOME', 'SBX_CHROME_START_TIMEOUT', 'LD_LIBRARY_PATH', 'LD_PRELOAD',
+    'NODE_OPTIONS', 'GITHUB_TOKEN', 'OPENAI_API_KEY']) assert.ok(!ENV_NAMES.includes(n), n);
   const yaml = path.join(here, '..', '..', 'chromium-display.yaml');
   if (!fs.existsSync(yaml)) { process.stdout.write('  (descriptor not in this tree; hook comparison runs from the repository)\n'); return; }
   const hook = /sbx-chrome", "--if-display"\][\s\S]*?env: \[([^\]]*)\]/.exec(fs.readFileSync(yaml, 'utf8'));
