@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const modulePath = path.resolve(process.argv[2] || path.join(here, '..', 'register.mjs'));
-const { ENV_NAMES, RegisterError, planCodex, isOurCommand, main } = await import(pathToFileURL(modulePath).href);
+const { ENV_NAMES, RegisterError, planCodex, isOurCommand, isOurCodexCommand, main } = await import(pathToFileURL(modulePath).href);
 
 const CMD = '/opt/sbx-chromium/bin/sbx-browser-mcp';
 const ENV_LINE = `env_vars = [${ENV_NAMES.map(n => JSON.stringify(n)).join(', ')}]`;
@@ -159,6 +159,20 @@ test('a Codex user entry that only mentions the kit in a comment or another key 
     assert.equal(text, null, before);
     assert.match(result, /^left alone: /);
   }
+});
+
+test('Codex owns only the sbx-browser-mcp command it ever wrote; user chrome-devtools-mcp entries stay byte-unchanged', () => {
+  assert.equal(isOurCodexCommand(CMD), true);
+  for (const c of ['chrome-devtools-mcp', '/usr/local/bin/chrome-devtools-mcp', 'npx', null]) assert.equal(isOurCodexCommand(c), false, String(c));
+  const s = sandbox();
+  try {
+    for (const cmd of ['chrome-devtools-mcp', '/usr/local/bin/chrome-devtools-mcp']) {
+      const before = `approval_policy = "never"\n\n[mcp_servers.chrome-devtools]\ncommand = "${cmd}"\nstartup_timeout_sec = 30\n`;
+      fs.writeFileSync(s.config, before);
+      assert.match(s.run().out, /codex: left alone: /, cmd);
+      assert.equal(fs.readFileSync(s.config, 'utf8'), before, cmd);
+    }
+  } finally { s.cleanup(); }
 });
 
 test('an unclosed env_vars array is a configuration error', () => {
