@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-15T16:22:00Z
+updated_at: 2026-11-15T16:31:00Z
 ---
 
 Epic chromium-brow; order 3. Launcher currently unsets proxy variables and
@@ -157,4 +157,15 @@ register-test is 34/34, and tomllib validates every planned output and
 input. QC's round-7 adversarial (7/7), round-8 adjacent-key probe and its
 validator (2/2) pass on scratch copies. Codex fresh, legacy and repeat
 SHA256 match QC's values, so the round-2 Codex runs stand. CI checks
+passed. No kit build was run and Docker was not touched.
+
+Round 10 (7a1cc2e), QC round-9 F3 aliases. Codex keys and headers are compared
+by decoded TOML identity (bare, literal, basic with \u and \U escapes).
+Undecodable keys, unreadable lines and escaped server headers leave the file
+unchanged with the names to add. The four alias fixtures that produced a
+duplicate table at f4b8072 are now preserved and valid. A name that decodes
+to a different server stays unrelated. register-test is 37/37 with tomllib
+validation. QC's round-7, round-8 and round-9 scripts pass on scratch copies,
+including the Codex 0.166 alias config load (2/2) and the 8 ordinary
+upgrades. Codex fresh, legacy and repeat SHA256 match QC's values. CI checks
 passed. No kit build was run and Docker was not touched.
