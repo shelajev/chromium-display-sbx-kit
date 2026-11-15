@@ -161,12 +161,15 @@ test('a Codex user entry that only mentions the kit in a comment or another key 
   }
 });
 
-test('Codex owns only the sbx-browser-mcp command it ever wrote; user chrome-devtools-mcp entries stay byte-unchanged', () => {
-  assert.equal(isOurCodexCommand(CMD), true);
-  for (const c of ['chrome-devtools-mcp', '/usr/local/bin/chrome-devtools-mcp', 'npx', null]) assert.equal(isOurCodexCommand(c), false, String(c));
+test('Codex owns only the exact managed or released command; other commands stay byte-unchanged', () => {
+  assert.equal(isOurCodexCommand(CMD, CMD), true);
+  // The value 2.0.0-2.0.2 wrote, even when this run manages another path.
+  assert.equal(isOurCodexCommand('/opt/sbx-chromium/bin/sbx-browser-mcp', '/elsewhere/bin/sbx-browser-mcp'), true);
+  for (const c of ['/home/me/sbx-browser-mcp', '/usr/local/bin/sbx-browser-mcp', 'sbx-browser-mcp', 'chrome-devtools-mcp',
+    '/usr/local/bin/chrome-devtools-mcp', 'npx', null]) assert.equal(isOurCodexCommand(c, CMD), false, String(c));
   const s = sandbox();
   try {
-    for (const cmd of ['chrome-devtools-mcp', '/usr/local/bin/chrome-devtools-mcp']) {
+    for (const cmd of ['/home/me/sbx-browser-mcp', 'chrome-devtools-mcp', '/usr/local/bin/chrome-devtools-mcp', 'npx']) {
       const before = `approval_policy = "never"\n\n[mcp_servers.chrome-devtools]\ncommand = "${cmd}"\nstartup_timeout_sec = 30\n`;
       fs.writeFileSync(s.config, before);
       assert.match(s.run().out, /codex: left alone: /, cmd);

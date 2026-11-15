@@ -114,10 +114,14 @@ export function isOurCommand(command, args = []) {
   const target = args.find(a => a !== '-y' && a !== '--yes');
   return typeof target === 'string' && /^chrome-devtools-mcp(@[^\s/]*)?$/.test(target);
 }
-// Every release only ever wrote `command = "$PREFIX/bin/sbx-browser-mcp"` into
-// Codex's config.toml, so for Codex that is the only form that is ours; a
-// user's own chrome-devtools-mcp or npx entry is never touched.
-export const isOurCodexCommand = command => base(command) === 'sbx-browser-mcp';
+// A Codex entry is ours only when its command is exactly the managed command
+// this run writes, or exactly a value an earlier release wrote. 2.0.0 through
+// 2.0.2 all wrote /opt/sbx-chromium/bin/sbx-browser-mcp. Any other value — a
+// custom path with the same file name, a direct chrome-devtools-mcp, an npx
+// entry — is the user's and is never touched.
+const CODEX_LEGACY_COMMANDS = Object.freeze(['/opt/sbx-chromium/bin/sbx-browser-mcp']);
+export const isOurCodexCommand = (value, managed) =>
+  typeof value === 'string' && (value === managed || CODEX_LEGACY_COMMANDS.includes(value));
 const ownsCommandEntry = e => isObject(e) && isOurCommand(e.command, e.args);
 const ownsOpencodeEntry = e => isObject(e) && Array.isArray(e.command) && isOurCommand(e.command[0], e.command.slice(1));
 
@@ -170,7 +174,7 @@ export function planCodex(text, command) {
   let end = lines.findIndex((l, i) => i > start && ANY_HEADER.test(l.replace(/\r$/, '')));
   if (end < 0) end = lines.length;
   const cmdRow = lines.findIndex((l, i) => i > start && i < end && COMMAND_KEY.test(l));
-  if (cmdRow < 0 || !isOurCodexCommand(tomlString(COMMAND_KEY.exec(lines[cmdRow])[1]))) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
+  if (cmdRow < 0 || !isOurCodexCommand(tomlString(COMMAND_KEY.exec(lines[cmdRow])[1]), command)) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
 
   // Ours, possibly from a release that did not pass the environment through.
   const envRow = lines.findIndex((l, i) => i > start && i < end && ENV_VARS_KEY.test(l));
