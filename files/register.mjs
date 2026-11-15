@@ -5,23 +5,58 @@
 // by the agent itself, and a layer replaces a file rather than merging into
 // it. So this merges at create (after the agent kit's own install hooks,
 // which `integrates` orders first) and again at boot, touching a file only
-// when the entry is missing.
+// when the entry is missing or is this kit's own entry from an older release.
 //
 // An existing `chrome-devtools` entry that points somewhere else is the
 // user's choice and is left as it is, with a note on stderr.
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { isFsError } from './proxy-trust.mjs';
 
-const [, , command, ...flags] = process.argv;
-const quiet = flags.includes('--quiet');
 const NAME = 'chrome-devtools';
-const home = process.env.HOME;
-const log = msg => { if (!quiet) process.stderr.write(`sbx-browser-register: ${msg}\n`); };
 
-function onPath(bin) {
-  return (process.env.PATH || '').split(':').some(dir => {
-    try { fs.accessSync(path.join(dir, bin), fs.constants.X_OK); return true; } catch { return false; }
+// The environment NAMES (never values) an agent must hand the MCP server so
+// that the browser it starts or attaches to keeps the sandbox proxy, its CA
+// and the display/GPU controls. They are exactly the names the descriptor's
+// `sbx-chrome --if-display` startup hook declares, so a browser started by
+// the MCP server sees what a browser started by that hook sees. Who reads them:
+//   proxy:   *_PROXY / *_proxy  proxy-trust.mjs plan(), sbx-chromium, sbx-browser-mcp
+//   CA:      SSL_CERT_FILE, PROXY_CA_CERT_B64, SBX_PROXY_CA_FILE  proxy-trust.mjs caSources()
+//   mode:    SBX_PROXY_MODE  proxy-trust.mjs plan()
+//   display: WAYLAND_DISPLAY, XDG_RUNTIME_DIR, SBX_WAYLAND_SOCKET  wayland-probe.mjs discover();
+//            DISPLAY, SBX_CHROME_HEADLESS  display.sh sbx_detect_display()
+//   GPU:     SBX_CHROME_DISABLE_GPU  sbx-chromium
+// Codex starts stdio MCP servers with a cleared environment plus a small core
+// set (HOME, PATH, locale, …, and CA bundle paths such as SSL_CERT_FILE), so
+// without `env_vars` the proxy variables never arrive and the browser refuses
+// to start or attach while the sandbox CA is present.
+export const ENV_NAMES = Object.freeze([
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+  'SSL_CERT_FILE', 'PROXY_CA_CERT_B64', 'SBX_PROXY_CA_FILE', 'SBX_PROXY_MODE',
+  'WAYLAND_DISPLAY', 'DISPLAY', 'XDG_RUNTIME_DIR', 'SBX_WAYLAND_SOCKET',
+  'SBX_CHROME_HEADLESS', 'SBX_CHROME_DISABLE_GPU',
+]);
+
+// A configuration this script will not change and the user has to fix.
+export class RegisterError extends Error {}
+const isAbsent = e => isFsError(e) && (e.code === 'ENOENT' || e.code === 'ENOTDIR');
+
+function onPath(bin, envPath) {
+  return (envPath || '').split(':').some(dir => {
+    try { fs.accessSync(path.join(dir, bin), fs.constants.X_OK); return true; }
+    catch (e) { if (isFsError(e)) return false; throw e; }
   });
+}
+
+function readOptional(file) {
+  try { return fs.readFileSync(file, 'utf8'); }
+  catch (e) {
+    if (isAbsent(e)) return null;
+    if (isFsError(e)) throw new RegisterError(`cannot read ${file} (${e.code}); fix its permissions and run sbx-browser-register again`);
+    throw e;
+  }
 }
 
 // Write beside the target and rename over it, so a reader never sees half a
@@ -30,7 +65,8 @@ function writeAtomic(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.sbx-browser.${process.pid}`;
   let mode = 0o644;
-  try { mode = fs.statSync(file).mode & 0o777; } catch {}
+  try { mode = fs.statSync(file).mode & 0o777; }
+  catch (e) { if (!isAbsent(e)) throw e; }
   fs.writeFileSync(tmp, text, { mode });
   fs.renameSync(tmp, file);
 }
@@ -38,12 +74,11 @@ function writeAtomic(file, text) {
 // Merge `entry` at obj[key][NAME] in a JSON file. Returns what happened.
 function mergeJson(file, key, entry, isOurs) {
   let doc = {};
-  if (fs.existsSync(file)) {
-    const raw = fs.readFileSync(file, 'utf8');
-    if (raw.trim()) {
-      try { doc = JSON.parse(raw); } catch (e) {
-        return `skipped: ${file} is not valid JSON (${e.message})`;
-      }
+  const raw = readOptional(file);
+  if (raw?.trim()) {
+    try { doc = JSON.parse(raw); } catch (e) {
+      if (!(e instanceof SyntaxError)) throw e;
+      return `skipped: ${file} is not valid JSON (${e.message})`;
     }
   }
   const servers = (doc[key] ??= {});
@@ -57,60 +92,145 @@ function mergeJson(file, key, entry, isOurs) {
 
 // The v2 kit's entry (npx chrome-devtools-mcp --browser-url=…:9222) counts as
 // ours too, so upgrading replaces it instead of leaving it behind.
-const mentionsUs = e => JSON.stringify(e).includes('sbx-browser-mcp') || JSON.stringify(e).includes('chrome-devtools-mcp');
+const mentionsUs = text => text.includes('sbx-browser-mcp') || text.includes('chrome-devtools-mcp');
 
-const agents = [
-  {
-    name: 'claude',
-    present: () => onPath('claude'),
-    // User scope: top-level mcpServers in ~/.claude.json.
-    run: () => mergeJson(path.join(home, '.claude.json'), 'mcpServers',
-      { type: 'stdio', command, args: [], env: {} }, mentionsUs),
-  },
-  {
-    name: 'gemini',
-    present: () => onPath('gemini'),
-    run: () => mergeJson(path.join(home, '.gemini', 'settings.json'), 'mcpServers',
-      { command, args: [] }, mentionsUs),
-  },
-  {
-    name: 'cursor',
-    present: () => onPath('cursor-agent'),
-    run: () => mergeJson(path.join(home, '.cursor', 'mcp.json'), 'mcpServers',
-      { command, args: [] }, mentionsUs),
-  },
-  {
-    name: 'opencode',
-    present: () => onPath('opencode'),
-    run: () => mergeJson(path.join(home, '.config', 'opencode', 'opencode.json'), 'mcp',
-      { type: 'local', command: [command], enabled: true }, mentionsUs),
-  },
-  {
-    name: 'codex',
-    present: () => onPath('codex'),
-    // TOML, so append rather than parse: a new table at the end of the file
-    // cannot capture keys that belong to another one. Both header spellings
-    // count as present.
-    run: () => {
-      const file = path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'config.toml');
-      const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-      if (/^\[mcp_servers\.(chrome-devtools|"chrome-devtools"|'chrome-devtools')\]/m.test(text)) return 'already registered';
-      const block = `\n[mcp_servers.${NAME}]\ncommand = ${JSON.stringify(command)}\nstartup_timeout_sec = 30\n`;
-      writeAtomic(file, text + (text && !text.endsWith('\n') ? '\n' : '') + block);
-      return `registered in ${file}`;
-    },
-  },
-];
+// ── Codex: TOML, edited in place without a TOML library ──────────────────────
+// Only the lines of our own table are ever touched; everything else in the
+// file is kept byte for byte.
+const CODEX_HEADER = /^\s*\[\s*mcp_servers\s*\.\s*(?:chrome-devtools|"chrome-devtools"|'chrome-devtools')\s*\]\s*(?:#.*)?$/;
+const ANY_HEADER = /^\s*\[\[?\s*[^\]"'=]*(?:"[^"]*"|'[^']*')?[^\]=]*\]\]?\s*(?:#.*)?$/;
+const COMMAND_KEY = /^\s*command\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')/;
+const ENV_VARS_KEY = /^(\s*env_vars\s*=\s*)\[/;
+const tomlArray = names => `[${names.map(n => JSON.stringify(n)).join(', ')}]`;
 
-let found = 0;
-for (const agent of agents) {
-  if (!agent.present()) continue;
-  found++;
-  try {
-    log(`${agent.name}: ${agent.run()}`);
-  } catch (e) {
-    // One agent's broken config must not stop the others, or fail the hook.
-    log(`${agent.name}: failed: ${e.message}`);
+// From `[` at lines[row][col], the position just after the matching `]`,
+// skipping brackets inside strings and comments. Arrays of strings and inline
+// tables are what Codex accepts for env_vars; neither nests further arrays.
+function arrayEnd(lines, row, col) {
+  let quote = null;
+  for (let r = row; r < lines.length; r++) {
+    const line = lines[r];
+    for (let c = r === row ? col + 1 : 0; c < line.length; c++) {
+      const ch = line[c];
+      if (quote) {
+        if (quote === '"' && ch === '\\') c++;
+        else if (ch === quote) quote = null;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === '#') break;
+      else if (ch === ']') return { row: r, col: c + 1 };
+    }
   }
+  return null;
 }
-if (!found) log('no supported agent found on PATH (claude, codex, gemini, cursor-agent, opencode)');
+
+// What to do with the Codex config text. Returns {text, result}; text is null
+// when the file must not be written.
+export function planCodex(text, command) {
+  const fresh = `[mcp_servers.${NAME}]\ncommand = ${JSON.stringify(command)}\nstartup_timeout_sec = 30\nenv_vars = ${tomlArray(ENV_NAMES)}\n`;
+  const lines = text.split('\n');
+  const start = lines.findIndex(l => CODEX_HEADER.test(l.replace(/\r$/, '')));
+  if (start < 0) {
+    // A new table at the end of the file cannot capture keys that belong to
+    // another one.
+    return { text: text + (text && !text.endsWith('\n') ? '\n' : '') + '\n' + fresh, result: 'registered' };
+  }
+  let end = lines.findIndex((l, i) => i > start && ANY_HEADER.test(l.replace(/\r$/, '')));
+  if (end < 0) end = lines.length;
+  const cmdRow = lines.findIndex((l, i) => i > start && i < end && COMMAND_KEY.test(l));
+  const cmd = cmdRow < 0 ? '' : COMMAND_KEY.exec(lines[cmdRow])[1];
+  if (!mentionsUs(cmd)) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
+
+  // Ours, possibly from a release that did not pass the environment through.
+  const envRow = lines.findIndex((l, i) => i > start && i < end && ENV_VARS_KEY.test(l));
+  const cr = lines[cmdRow].endsWith('\r') ? '\r' : '';
+  if (envRow < 0) {
+    lines.splice(cmdRow + 1, 0, `env_vars = ${tomlArray(ENV_NAMES)}${cr}`);
+    return { text: lines.join('\n'), result: 'upgraded: added env_vars' };
+  }
+  const open = lines[envRow].indexOf('[', ENV_VARS_KEY.exec(lines[envRow])[1].length);
+  const close = arrayEnd(lines, envRow, open);
+  if (!close) throw new RegisterError(`the env_vars array of '${NAME}' is not closed; fix the TOML and run sbx-browser-register again`);
+  const body = [lines[envRow].slice(open + 1, close.row === envRow ? close.col - 1 : undefined),
+    ...lines.slice(envRow + 1, close.row), ...(close.row === envRow ? [] : [lines[close.row].slice(0, close.col - 1)])].join('\n');
+  const quoted = [...body.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)].map(m => m[0]);
+  const names = quoted.map(q => q.startsWith('"') ? JSON.parse(q) : q.slice(1, -1));
+  const missing = ENV_NAMES.filter(n => !names.includes(n));
+  if (!missing.length) return { text: null, result: 'already registered' };
+  // Inline tables ({name = …, source = …}) and comments are the user's own
+  // layout; rewriting them could lose a source or a note, so say what to add.
+  if (/[{#]/.test(body)) return { text: null, result: `left alone: the '${NAME}' env_vars uses a custom layout; add ${missing.join(', ')} to it so the browser keeps the sandbox proxy` };
+  const merged = `${lines[envRow].slice(0, open)}${tomlArray([...names, ...missing])}${lines[close.row].slice(close.col)}`;
+  lines.splice(envRow, close.row - envRow + 1, merged);
+  return { text: lines.join('\n'), result: `upgraded: added ${missing.join(', ')} to env_vars` };
+}
+
+function registerCodex(file, command) {
+  const plan = planCodex(readOptional(file) ?? '', command);
+  if (plan.text === null) return plan.result;
+  writeAtomic(file, plan.text);
+  return `${plan.result} in ${file}`;
+}
+
+export function agents(command, env) {
+  const home = env.HOME;
+  return [
+    {
+      name: 'claude',
+      present: () => onPath('claude', env.PATH),
+      // User scope: top-level mcpServers in ~/.claude.json.
+      run: () => mergeJson(path.join(home, '.claude.json'), 'mcpServers',
+        { type: 'stdio', command, args: [], env: {} }, e => mentionsUs(JSON.stringify(e))),
+    },
+    {
+      name: 'gemini',
+      present: () => onPath('gemini', env.PATH),
+      run: () => mergeJson(path.join(home, '.gemini', 'settings.json'), 'mcpServers',
+        { command, args: [] }, e => mentionsUs(JSON.stringify(e))),
+    },
+    {
+      name: 'cursor',
+      present: () => onPath('cursor-agent', env.PATH),
+      run: () => mergeJson(path.join(home, '.cursor', 'mcp.json'), 'mcpServers',
+        { command, args: [] }, e => mentionsUs(JSON.stringify(e))),
+    },
+    {
+      name: 'opencode',
+      present: () => onPath('opencode', env.PATH),
+      run: () => mergeJson(path.join(home, '.config', 'opencode', 'opencode.json'), 'mcp',
+        { type: 'local', command: [command], enabled: true }, e => mentionsUs(JSON.stringify(e))),
+    },
+    {
+      name: 'codex',
+      present: () => onPath('codex', env.PATH),
+      run: () => registerCodex(path.join(env.CODEX_HOME || path.join(home, '.codex'), 'config.toml'), command),
+    },
+  ];
+}
+
+// Returns the number of agents whose registration failed.
+export function main(argv, env) {
+  const [command, ...flags] = argv;
+  const quiet = flags.includes('--quiet');
+  const say = msg => process.stderr.write(`sbx-browser-register: ${msg}\n`);
+  let found = 0, failed = 0;
+  for (const agent of agents(command, env)) {
+    if (!agent.present()) continue;
+    found++;
+    try {
+      const result = agent.run();
+      if (!quiet) say(`${agent.name}: ${result}`);
+    } catch (e) {
+      // One agent's unreadable or broken config must not stop the others.
+      // Failures are reported even with --quiet; anything unexpected propagates.
+      if (!(e instanceof RegisterError) && !isFsError(e)) throw e;
+      failed++;
+      say(`${agent.name}: failed: ${e.message}`);
+    }
+  }
+  if (!found && !quiet) say('no supported agent found on PATH (claude, codex, gemini, cursor-agent, opencode)');
+  return failed;
+}
+
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main(process.argv.slice(2), process.env);
+}

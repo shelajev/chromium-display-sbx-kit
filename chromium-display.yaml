@@ -144,6 +144,8 @@ capabilities:
         # display.sh also finds the socket where sbx mounts it. The proxy and
         # CA variables are declared for the same reason: without them the
         # browser would refuse to start rather than bypass the sandbox proxy.
+        # register.mjs hands Codex the same names (ENV_NAMES, as env_vars) for
+        # the MCP server; register-test.mjs keeps the two lists equal.
         - command: ["/opt/sbx-chromium/bin/sbx-chrome", "--if-display"]
           user: agent
           background: true

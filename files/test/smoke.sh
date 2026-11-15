@@ -98,7 +98,9 @@ SBX_CHROME_DISABLE_GPU=1 "$PREFIX/node/bin/node" /tmp/test/gpu-fallback-test.mjs
 # TLS-intercepting proxy, synthetic CAs and synthetic credentials.
 "$PREFIX/node/bin/node" /tmp/test/proxy-ca-test.mjs
 
-# 6. Registration: only agents present, idempotent, user entries preserved.
+# 6. Registration: only agents present, idempotent, user entries preserved,
+# older kit entries upgraded, and Codex handed the browser's environment names.
+"$PREFIX/node/bin/node" /tmp/test/register-test.mjs "$PREFIX/libexec/register.mjs"
 mkdir -p fakebin "$HOME/.codex"
 for a in claude codex; do printf '#!/bin/sh\n' > "fakebin/$a"; chmod +x "fakebin/$a"; done
 printf '{"theme":"dark","mcpServers":{"other":{"command":"x"}}}\n' > "$HOME/.claude.json"
@@ -112,6 +114,7 @@ test "$(grep -c 'already registered' second.log)" = 2
   if (c.theme !== "dark" || !c.mcpServers.other) throw new Error("clobbered existing keys");
   if (!c.mcpServers["chrome-devtools"].command.endsWith("/sbx-browser-mcp")) throw new Error("not registered");'
 test "$(grep -c '^\[mcp_servers.chrome-devtools\]' "$HOME/.codex/config.toml")" = 1
+grep -q '^env_vars = \["HTTP_PROXY", "HTTPS_PROXY", ' "$HOME/.codex/config.toml"
 grep -q '^approval_policy = "never"' "$HOME/.codex/config.toml"
 test ! -e "$HOME/.gemini"
 echo "smoke: ok"
