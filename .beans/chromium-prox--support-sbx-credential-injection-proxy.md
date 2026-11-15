@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-15T16:04:00Z
+updated_at: 2026-11-15T16:13:00Z
 ---
 
 Epic chromium-brow; order 3. Launcher currently unsets proxy variables and
@@ -134,3 +134,15 @@ runs stand. No image was built this round; QC runs the final build. CI
 script checks passed, and the ownership audit passed on the round-6 layout.
 No build cache was removed: last-used times do not reflect cache hits, so
 they cannot select obsolete records safely (evidence/73).
+
+Round 8 (9a5e06f), QC round-7 F1 and F2. Codex edits now apply only at TOML
+statement level. A small lexer skips ''' and """ strings and comments; a
+file it cannot follow is left unchanged with the names to add. env_vars
+counts only real array string elements. Arrays with comments, inline tables
+or multi-line strings are preserved with guidance, never reported as
+registered. The three new regressions fail on 0ab4330's module and pass now
+(register-test 30/30). QC's adversarial.mjs, run unmodified, passes 7/7.
+QC's parser-proof.mjs, which asserts the old defect, now fails at that
+assertion. Codex fresh, legacy and repeat output SHA256 match QC's recorded
+values, so the round-2 Codex runs stand. CI script checks passed. No kit
+build was run this round, and nothing was pruned.
