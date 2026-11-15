@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-15T15:57:00Z
+updated_at: 2026-11-15T16:00:00Z
 ---
 
 Epic chromium-brow; order 3. Launcher currently unsets proxy variables and
@@ -111,3 +111,13 @@ fresh, legacy and repeated runs is byte-identical to 995c9cb, so the round-2
 Codex 0.166 runs stand. The leader's reviewed copy is applied verbatim and
 checked against the code. At 4c132d2, with the cache kept: build, smoke,
 proxy-ca, register-test 27/27, kit-tck 19/19, audit and CI checks passed.
+
+Round 6 (d685772). Codex ownership is now exact: the managed command, or
+the single value 2.0.0 through 2.0.2 wrote (/opt/sbx-chromium/bin/sbx-browser-mcp,
+confirmed per tag). /home/me/sbx-browser-mcp, chrome-devtools-mcp and npx
+entries stay byte-unchanged; a basename mutant fails register-test. JSON
+client ownership is unchanged. Codex output for fresh, legacy and repeated
+runs is byte-identical to 995c9cb, so the round-2 Codex 0.166 runs stand.
+The reviewed copy still matches the code. At d685772, with the cache kept:
+build, smoke, proxy-ca, register-test 27/27, kit-tck 19/19, audit and CI
+checks passed.
