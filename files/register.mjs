@@ -177,7 +177,8 @@ export function planCodex(text, command) {
   const body = [lines[envRow].slice(open + 1, close.row === envRow ? close.col - 1 : undefined),
     ...lines.slice(envRow + 1, close.row), ...(close.row === envRow ? [] : [lines[close.row].slice(0, close.col - 1)])].join('\n');
   const quoted = [...body.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)].map(m => m[0]);
-  const names = quoted.map(q => q.startsWith('"') ? JSON.parse(q) : q.slice(1, -1));
+  const names = quoted.map(tomlString);
+  if (names.includes(null)) throw new RegisterError(`an env_vars name of '${NAME}' is not a plain quoted string; fix the TOML and run sbx-browser-register again`);
   const missing = ENV_NAMES.filter(n => !names.includes(n));
   if (!missing.length) return { text: null, result: 'already registered' };
   // Inline tables ({name = …, source = …}) and comments are the user's own
@@ -189,7 +190,14 @@ export function planCodex(text, command) {
 }
 
 function registerCodex(file, command) {
-  const plan = planCodex(readOptional(file) ?? '', command);
+  const text = readOptional(file) ?? '';
+  let plan;
+  try { plan = planCodex(text, command); }
+  catch (e) {
+    // Name the file; the message never carries its content.
+    if (e instanceof RegisterError) throw new RegisterError(`${file}: ${e.message}`);
+    throw e;
+  }
   if (plan.text === null) return plan.result;
   writeAtomic(file, plan.text);
   return `${plan.result} in ${file}`;

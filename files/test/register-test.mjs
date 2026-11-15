@@ -251,6 +251,25 @@ test('Codex messages never quote config content', () => {
   } finally { s.cleanup(); }
 });
 
+test('a malformed quoted env_vars name fails Codex only, without echoing it; other agents still register', () => {
+  // A bad escape, a bad unicode escape and a raw control character, each beside the marker.
+  for (const bad of [`"${MARKER}\\q"`, `"${MARKER}\\uZZZZ"`, `"${MARKER}\u0001"`]) {
+    const s = sandbox(['codex', 'claude']);
+    try {
+      const text = `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = ["HTTP_PROXY", ${bad}]\n`;
+      fs.writeFileSync(s.config, text);
+      const r = s.run();
+      assert.equal(r.failed, 1, bad);
+      assert.match(r.out, /codex: failed: .*config\.toml: an env_vars name of 'chrome-devtools' is not a plain quoted string; fix the TOML/);
+      assert.ok(!r.out.includes('SYNTHETIC'), `config content leaked: ${r.out}`);
+      assert.equal(fs.readFileSync(s.config, 'utf8'), text);
+      assert.match(r.out, /claude: registered in /);
+      const claude = JSON.parse(fs.readFileSync(path.join(s.env.HOME, '.claude.json'), 'utf8'));
+      assert.equal(claude.mcpServers['chrome-devtools'].command, CMD);
+    } finally { s.cleanup(); }
+  }
+});
+
 test('JSON user entries that mention the kit only in env or other keys are left alone', () => {
   const s = sandbox(['claude', 'gemini', 'cursor-agent', 'opencode']);
   try {
