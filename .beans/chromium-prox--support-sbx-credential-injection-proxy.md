@@ -1,15 +1,15 @@
 ---
 # chromium-prox
 title: Support SBX credential injection proxy
-status: in-progress
+status: completed
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-15T16:31:00Z
+updated_at: 2026-11-15T16:59:00Z
 ---
 
-Epic chromium-brow; order 3. Launcher currently unsets proxy variables and
-forces no-proxy-server. Establish SBX's browser proxy/CA contract, then implement
+Epic chromium-brow; order 3. The original launcher unset proxy variables and
+forced no-proxy-server. Establish SBX's browser proxy/CA contract, then implement
 trust and routing without certificate-error bypasses or embedding real secrets.
 Determine supported protocols, including WebSocket behavior relevant to Teams.
 
@@ -169,3 +169,16 @@ validation. QC's round-7, round-8 and round-9 scripts pass on scratch copies,
 including the Codex 0.166 alias config load (2/2) and the 8 ordinary
 upgrades. Codex fresh, legacy and repeat SHA256 match QC's values. CI checks
 passed. No kit build was run and Docker was not touched.
+
+Closed after [v2.0.3](https://github.com/shelajev/chromium-display-sbx-kit/releases/tag/v2.0.3)
+publication at source `622550e`. Independent QC10 passed the exact clean commit,
+37 registration tests, bounded preservation regressions, full smoke/build and
+TCK 19/19. Both native CI architectures and publication passed; the initial
+AMD64 Debian download reset passed one diagnosed retry without source changes.
+A fresh public-image composition with official Codex 0.166.0 exposes 34 browser
+tools and calls `list_pages` through its generated registration, with no env-name
+override or model turn. Stop exits 0 with no owned PIDs or profile lock. The
+exact source candidate also passed same-client reconnect after browser restart.
+Published index TCK conforms with 18 passes and one annotation-fallback warning.
+Native clipboard activation, Mac/VFIO hardware and authenticated Teams/expense
+workflows remain separate open gates; this does not create profile secrecy.
