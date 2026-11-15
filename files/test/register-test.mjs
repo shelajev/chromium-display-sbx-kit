@@ -137,8 +137,14 @@ test('ownership is decided by the command (and legacy npx args) only', () => {
   for (const c of [CMD, '/usr/local/bin/sbx-browser-mcp', 'chrome-devtools-mcp']) assert.equal(isOurCommand(c), true, c);
   assert.equal(isOurCommand('npx', ['-y', 'chrome-devtools-mcp@latest', '--browser-url=http://127.0.0.1:9222']), true);
   assert.equal(isOurCommand('npx', ['chrome-devtools-mcp']), true);
+  // The legacy v2 form, exactly.
+  assert.equal(isOurCommand('npx', ['chrome-devtools-mcp', '--browser-url=http://127.0.0.1:9222']), true);
+  assert.equal(isOurCommand('/usr/bin/npx', ['--yes', 'chrome-devtools-mcp@1.12.0']), true);
+  // npx runs its first package: another package first is someone else's invocation.
   for (const [c, a] of [['/usr/bin/other', []], ['/home/me/my-sbx-browser-mcp-fork', []], ['sbx-browser-mcp.sh', []],
-    ['npx', ['other-mcp', '--note=chrome-devtools-mcp']], ['npx', []], [undefined, []], [['sbx-browser-mcp'], []]])
+    ['npx', ['other-mcp', '--note=chrome-devtools-mcp']], ['npx', []], [undefined, []], [['sbx-browser-mcp'], []],
+    ['npx', ['other-package', 'chrome-devtools-mcp']], ['npx', ['-y', 'other-package', 'chrome-devtools-mcp@latest']],
+    ['npx', ['--package', 'other-package', 'chrome-devtools-mcp']], ['npx', ['chrome-devtools-mcp-fork']]])
     assert.equal(isOurCommand(c, a), false, JSON.stringify([c, a]));
 });
 
@@ -290,6 +296,32 @@ test('JSON user entries that mention the kit only in env or other keys are left 
       assert.match(out, new RegExp(`${name}: left alone: `), name);
       assert.equal(fs.readFileSync(file, 'utf8'), before[name], name);
     }
+  } finally { s.cleanup(); }
+});
+
+test('npx entries whose target is another package stay user-owned and byte-unchanged', () => {
+  const s = sandbox(['claude', 'opencode']);
+  try {
+    const H = s.env.HOME;
+    const claude = path.join(H, '.claude.json'), opencode = path.join(H, '.config', 'opencode', 'opencode.json');
+    fs.mkdirSync(path.dirname(opencode), { recursive: true });
+    const c = JSON.stringify({ mcpServers: { 'chrome-devtools': { command: 'npx', args: ['other-package', 'chrome-devtools-mcp'] } } });
+    const o = JSON.stringify({ mcp: { 'chrome-devtools': { type: 'local', command: ['npx', '-y', 'other-package', 'chrome-devtools-mcp'], enabled: true } } });
+    fs.writeFileSync(claude, c); fs.writeFileSync(opencode, o);
+    const { out } = s.run();
+    assert.match(out, /claude: left alone: /); assert.match(out, /opencode: left alone: /);
+    assert.equal(fs.readFileSync(claude, 'utf8'), c); assert.equal(fs.readFileSync(opencode, 'utf8'), o);
+  } finally { s.cleanup(); }
+});
+
+test('the legacy npx form is replaced, including the OpenCode command-array form', () => {
+  const s = sandbox(['opencode']);
+  try {
+    const opencode = path.join(s.env.HOME, '.config', 'opencode', 'opencode.json');
+    fs.mkdirSync(path.dirname(opencode), { recursive: true });
+    fs.writeFileSync(opencode, JSON.stringify({ mcp: { 'chrome-devtools': { type: 'local', command: ['npx', '-y', 'chrome-devtools-mcp@latest', '--browser-url=http://127.0.0.1:9222'], enabled: true } } }));
+    assert.match(s.run().out, /opencode: registered in /);
+    assert.deepEqual(JSON.parse(fs.readFileSync(opencode, 'utf8')).mcp['chrome-devtools'], { type: 'local', command: [CMD], enabled: true });
   } finally { s.cleanup(); }
 });
 

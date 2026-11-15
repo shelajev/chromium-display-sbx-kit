@@ -101,14 +101,18 @@ function mergeJson(file, key, entry, isOurs) {
 
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 // An entry is this kit's only by what it runs: this kit's server, or the v2
-// kit's `npx chrome-devtools-mcp …` / a direct chrome-devtools-mcp, so
-// upgrading replaces those instead of leaving them behind. Comments, env and
-// other keys never decide it.
+// kit's `npx chrome-devtools-mcp --browser-url=…` / a direct
+// chrome-devtools-mcp, so upgrading replaces those instead of leaving them
+// behind. Comments, env and other keys never decide it. For npx, the package
+// is the first argument after npx's own -y/--yes; any other option, or any
+// other package first, is someone else's invocation and is left alone.
 const base = p => typeof p === 'string' ? p.split('/').pop() : '';
 export function isOurCommand(command, args = []) {
   const name = base(command);
   if (name === 'sbx-browser-mcp' || name === 'chrome-devtools-mcp') return true;
-  return name === 'npx' && Array.isArray(args) && args.some(a => typeof a === 'string' && /^chrome-devtools-mcp(@[^\s/]*)?$/.test(a));
+  if (name !== 'npx' || !Array.isArray(args)) return false;
+  const target = args.find(a => a !== '-y' && a !== '--yes');
+  return typeof target === 'string' && /^chrome-devtools-mcp(@[^\s/]*)?$/.test(target);
 }
 const ownsCommandEntry = e => isObject(e) && isOurCommand(e.command, e.args);
 const ownsOpencodeEntry = e => isObject(e) && Array.isArray(e.command) && isOurCommand(e.command[0], e.command.slice(1));
