@@ -215,14 +215,55 @@ const UNCERTAIN = [
   ['parent-table quoted inline server', `[mcp_servers]\n"chrome-devtools" = { command = "${CMD}" }\n`],
   ['top-level inline mcp_servers', `mcp_servers = { chrome-devtools = { command = "${CMD}" } }\n`],
   ['top-level dotted key', `mcp_servers.chrome-devtools.command = "${CMD}"\n`],
-  ['quoted header spelling', `["mcp_servers".chrome-devtools]\ncommand = "${CMD}"\n`],
+  // Escaped spellings of the same keys (\u and \U); identity, not text, decides.
+  ['escaped root inline mcp_servers', `"mcp_\\u0073ervers" = { "chrome-devtools" = { command = "${CMD}" } }\n`],
+  ['\\U-escaped server inside [mcp_servers]', `[mcp_servers]\n"chrome-\\U00000064evtools" = { command = "${CMD}" }\n`],
+  ['escaped root dotted keys', `"mcp_servers"."chrome-\\u0064evtools".command = "${CMD}"\n`],
+  ['escaped env_vars key', `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\n"env_\\u0076ars" = ["USER_CUSTOM"]\n`],
+  ['escaped command key', `[mcp_servers.chrome-devtools]\n"comm\\u0061nd" = "${CMD}"\n`],
+  ['escaped header alias', `["mcp_servers"."chrome-\\u0064evtools"]\ncommand = "${CMD}"\nenv_vars = ["USER_CUSTOM"]\n`],
+  ['\\U-escaped header alias', `[mcp_servers."chrome-\\U00000064evtools"]\ncommand = "${CMD}"\nstartup_timeout_sec = 30\n`],
 ];
+
+// Plainly quoted headers are the same table by identity: edited in place, never doubled.
+const SAME_TABLE = [
+  `["mcp_servers".chrome-devtools]\ncommand = "${CMD}"\n`,
+  `['mcp_servers'."chrome-devtools"]\ncommand = "${CMD}"\nenv_vars = ["USER_CUSTOM"]\n`,
+];
+// Differs from chrome-devtools only by an escape that names another server.
+const OTHER_SERVER = `[mcp_servers."chrome-devtool\\u0073-x"]\ncommand = "${CMD}"\n`;
 
 test('any other spelling or placement of the server or its keys is left unchanged with guidance', () => {
   for (const [label, before] of UNCERTAIN) {
     const { text, result } = planCodex(before, CMD);
     assert.equal(text, null, label);
     assert.match(result, /^left alone: .*, so the file is uncertain to edit; make sure \[mcp_servers\.chrome-devtools\] lists env_vars = \["HTTP_PROXY"/, label);
+  }
+});
+
+test('a plainly quoted header that is the same table by key identity is upgraded in place, once', () => {
+  for (const before of SAME_TABLE) {
+    const { text, result } = planCodex(before, CMD);
+    assert.match(result, /^upgraded: added /, before);
+    assert.equal(text.split('\n').filter(l => l.startsWith('[')).length, 1, before);
+    assert.ok(text.startsWith(before.split('\n')[0] + '\n'), before);
+    if (before.includes('USER_CUSTOM')) assert.ok(text.includes('env_vars = ["USER_CUSTOM", "HTTP_PROXY"'), before);
+    assert.equal(planCodex(text, CMD).result, 'already registered', before);
+  }
+});
+
+test('a server whose escaped name decodes to a different name stays unrelated', () => {
+  const { text, result } = planCodex(OTHER_SERVER, CMD);
+  assert.equal(result, 'registered');
+  assert.equal(text, `${OTHER_SERVER}\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nstartup_timeout_sec = 30\n${ENV_LINE}\n`);
+});
+
+test('a key with an escape that cannot be decoded with certainty makes the file uncertain', () => {
+  // \x and \e are not TOML 1.0 escapes; whether they name this server is unknown.
+  for (const before of [`[mcp_servers."chrome-\\x64evtools"]\ncommand = "${CMD}"\n`, `"mcp_servers\\e" = 1\n`]) {
+    const { text, result } = planCodex(before, CMD);
+    assert.equal(text, null, before);
+    assert.match(result, /could not be read.*uncertain to edit/, before);
   }
 });
 
@@ -258,7 +299,7 @@ test('every planned Codex output is valid TOML (python3 tomllib, when present)',
     `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nstartup_timeout_sec = 90\ntool_timeout_sec = 120\n\n[mcp_servers.chrome-devtools.env]\nCHROME_REMOTE_DEBUGGING_PORT = "9333"\n`,
     `${SAMPLE("'''")}\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nstartup_timeout_sec = 30\n`, SAMPLE('"""'),
     `[mcp_servers]\nother = { command = "x" }\n\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nsettings.env_vars = "not ours"\n`,
-    ...UNCERTAIN.map(([, t]) => t),
+    ...UNCERTAIN.map(([, t]) => t), ...SAME_TABLE, OTHER_SERVER,
   ];
   // Inputs are checked too, so a fixture cannot be invalid TOML by mistake.
   const outputs = [...inputs, ...inputs.map(t => planCodex(t, CMD).text ?? t)];

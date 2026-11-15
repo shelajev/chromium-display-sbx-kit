@@ -118,8 +118,6 @@ const ownsOpencodeEntry = managed => e => isObject(e) && Array.isArray(e.command
 // ── Codex: TOML, edited in place without a TOML library ──────────────────────
 // Only the lines of our own table are ever touched; everything else in the
 // file is kept byte for byte.
-const CODEX_HEADER = /^\s*\[\s*mcp_servers\s*\.\s*(?:chrome-devtools|"chrome-devtools"|'chrome-devtools')\s*\]\s*(?:#.*)?$/;
-const ANY_HEADER = /^\s*\[\[?\s*[^\]"'=]*(?:"[^"]*"|'[^']*')?[^\]=]*\]\]?\s*(?:#.*)?$/;
 const COMMAND_KEY = /^\s*command\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')/;
 const ENV_VARS_KEY = /^(\s*env_vars\s*=\s*)\[/;
 // The value of a quoted TOML string; basic strings use JSON-compatible escapes
@@ -134,21 +132,25 @@ const tomlArray = names => `[${names.map(n => JSON.stringify(n)).join(', ')}]`;
 // ''' and """ included) and not continuing a comment. Only those can hold a
 // table header, `command` or `env_vars`, so an example inside, say,
 // developer_instructions is never taken for the real entry. null when the
-// text cannot be followed with certainty (an unterminated string, or a
-// closing ''' / """ followed by more quotes); the caller then edits nothing.
+// text cannot be followed with certainty (an unterminated string, a closing
+// ''' / """ followed by more quotes, or an unmatched closing bracket); the
+// caller then edits nothing. Lines inside a multi-line array or inline table
+// are not statements either.
 function statementLines(text) {
   const starts = [true];
-  let state = 'code';
+  let state = 'code', depth = 0;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (ch === '\n') {
       if (state === 'basic' || state === 'literal') return null;
       if (state === 'comment') state = 'code';
-      starts.push(state === 'code');
+      starts.push(state === 'code' && depth === 0);
       continue;
     }
     if (state === 'code') {
       if (ch === '#') state = 'comment';
+      else if (ch === '[' || ch === '{') depth++;
+      else if ((ch === ']' || ch === '}') && --depth < 0) return null;
       else if (text.startsWith('"""', i)) { state = 'ml-basic'; i += 2; }
       else if (text.startsWith("'''", i)) { state = 'ml-literal'; i += 2; }
       else if (ch === '"') state = 'basic';
@@ -167,7 +169,10 @@ function statementLines(text) {
       state = 'code'; i += 2;
     }
   }
-  return state === 'code' || state === 'comment' ? starts : null;
+  if (state !== 'code' && state !== 'comment') return null;
+  // An array still open at the end: the lines after it are not statements.
+  starts.open = depth > 0;
+  return starts;
 }
 
 // From `[` at lines[row][col]: where the array ends (just after its `]`) and
@@ -196,44 +201,98 @@ function scanArray(lines, row, col) {
   return null;
 }
 
-// Statements this script does not model and that could define this server,
-// its command or its env_vars a second way: quoted or dotted spellings of
-// those keys, a non-array env_vars, a second copy of the table, sub-tables
-// named after those keys, a [mcp_servers] table or root key defining the
-// server, or an inline mcp_servers table. Editing then could write a
-// duplicate key, so any of them makes the file uncertain: returns the reason,
-// or null. Within the owned table only `ownedFrom..ownedTo` lines are checked.
-const MCP_TABLE = /^\s*\[\s*(?:mcp_servers|"mcp_servers"|'mcp_servers')\s*\]\s*(?:#.*)?$/;
-const OWNED_SUBTABLE = /^\s*\[\s*mcp_servers\s*\.\s*(?:chrome-devtools|"chrome-devtools"|'chrome-devtools')\s*\.\s*([A-Za-z0-9_-]+)\s*\]\s*(?:#.*)?$/;
-const QUOTED_KEY = /^\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*[.=]/;
-const BARE_KEY = /^\s*([A-Za-z0-9_-]+)\s*([.=])/;
-function ambiguity(lines, atStatement, ownedFrom, ownedTo) {
-  let table = null, headers = 0;
+// A TOML key path at t[i]: dotted segments, each bare, 'literal' or "basic"
+// with its escapes decoded, so differently spelled keys compare by identity.
+// {path, end, bare, escaped} (bare: no segment was quoted; escaped: a segment
+// used an escape), or null when it is not a key path this code can decode
+// with certainty.
+function keyPath(t, i) {
+  const path = [];
+  let bare = true, escaped = false;
+  for (;;) {
+    while (t[i] === ' ' || t[i] === '\t') i++;
+    const word = /^[A-Za-z0-9_-]+/.exec(t.slice(i));
+    if (word) { path.push(word[0]); i += word[0].length; }
+    else if (t[i] === "'") {
+      const j = t.indexOf("'", i + 1);
+      if (j < 0) return null;
+      path.push(t.slice(i + 1, j)); i = j + 1; bare = false;
+    } else if (t[i] === '"') {
+      const key = basicKey(t, i);
+      if (!key) return null;
+      path.push(key.value); i = key.end; bare = false; escaped ||= key.escaped;
+    } else return null;
+    while (t[i] === ' ' || t[i] === '\t') i++;
+    if (t[i] !== '.') return { path, end: i, bare, escaped };
+    i++;
+  }
+}
+const ESCAPES = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', '"': '"', '\\': '\\' };
+// A "basic" key from its opening quote at t[i]: TOML 1.0 escapes, including
+// \uXXXX and \UXXXXXXXX. Any other escape is not decoded with certainty.
+function basicKey(t, i) {
+  let value = '';
+  for (let j = i + 1; j < t.length; j++) {
+    if (t[j] === '"') return { value, end: j + 1, escaped: t.slice(i, j).includes('\\') };
+    if (t[j] !== '\\') { value += t[j]; continue; }
+    const e = t[++j];
+    if (Object.hasOwn(ESCAPES, e)) { value += ESCAPES[e]; continue; }
+    const digits = e === 'u' ? 4 : e === 'U' ? 8 : 0;
+    const hex = t.slice(j + 1, j + 1 + digits);
+    if (!digits || !new RegExp(`^[0-9A-Fa-f]{${digits}}$`).test(hex)) return null;
+    const code = parseInt(hex, 16);
+    if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return null;
+    value += String.fromCodePoint(code);
+    j += digits;
+  }
+  return null;
+}
+
+const SERVER = ['mcp_servers', NAME];
+const samePath = (a, b) => a.length === b.length && a.every((s, k) => s === b[k]);
+const hasPrefix = (path, prefix) => prefix.every((s, k) => path[k] === s);
+// Where [mcp_servers.chrome-devtools] starts and ends, judged by decoded key
+// identity over every statement: {start, end}, start -1 when it is absent.
+// {why} when the file defines this server, its command or its env_vars any
+// other way (another spelling of those keys, a dotted or inline definition, a
+// second table, a sub-table named after them, an mcp_servers value), or has a
+// statement that cannot be read; editing then could write a second
+// definition.
+function locate(lines, atStatement) {
+  let table = [], start = -1, end = lines.length;
   for (let i = 0; i < lines.length; i++) {
     if (!atStatement[i]) continue;
-    const t = lines[i].replace(/\r$/, '');
-    if (/^\s*\[/.test(t)) {
-      table = t;
-      if (CODEX_HEADER.test(t) && ++headers > 1) return `there are two [mcp_servers.${NAME}] tables`;
-      if (/mcp_servers/.test(t) && /chrome-devtools/.test(t) && !CODEX_HEADER.test(t)) {
-        const sub = OWNED_SUBTABLE.exec(t);
-        if (!sub || sub[1] === 'env_vars' || sub[1] === 'command') return `'${NAME}' is also defined by another table header`;
+    const t = lines[i].replace(/\r$/, '').trimStart();
+    if (t === '' || t[0] === '#') continue;
+    if (t[0] === '[') {
+      const array = t.startsWith('[['), close = array ? ']]' : ']';
+      const key = keyPath(t, array ? 2 : 1);
+      if (!key || !t.startsWith(close, key.end) || !/^\s*(#.*)?$/.test(t.slice(key.end + close.length))) return { why: 'a table header could not be read' };
+      table = key.path;
+      if (start >= 0 && end === lines.length) end = i;
+      if (array && (hasPrefix(table, SERVER) || hasPrefix(SERVER, table))) return { why: `'${NAME}' is defined through an array of tables` };
+      if (samePath(table, SERVER)) {
+        if (start >= 0) return { why: `there are two [mcp_servers.${NAME}] tables` };
+        if (key.escaped) return { why: `the [mcp_servers.${NAME}] header is spelled with escapes` };
+        start = i;
+      } else if (hasPrefix(table, SERVER) && (table[2] === 'env_vars' || table[2] === 'command')) {
+        return { why: `'${NAME}' has a sub-table named ${table[2]}` };
       }
       continue;
     }
-    if (i > ownedFrom && i < ownedTo) {
-      if (QUOTED_KEY.test(t)) return `the '${NAME}' table has a quoted key`;
-      const key = BARE_KEY.exec(t);
-      if (key && (key[1] === 'env_vars' || key[1] === 'command') && (key[2] === '.' || (key[1] === 'env_vars' && !ENV_VARS_KEY.test(t))))
-        return `the '${NAME}' table sets ${key[1]} in a form this script does not edit`;
-      continue;
-    }
-    const key = /^\s*([^=#[\]{]+?)\s*=/.exec(t);
-    if (!key) continue;
-    if (table === null && /mcp_servers/.test(key[1])) return 'mcp_servers is set by a top-level key';
-    if (table !== null && MCP_TABLE.test(table) && /chrome-devtools/.test(key[1])) return `'${NAME}' is set inside [mcp_servers]`;
+    const key = keyPath(t, 0);
+    if (!key || t[key.end] !== '=') return { why: 'a line could not be read as a TOML key' };
+    const full = [...table, ...key.path];
+    if (full[0] !== 'mcp_servers') continue;
+    if (full.length === 1) return { why: 'mcp_servers is set as a value' };
+    if (full[1] !== NAME) continue;
+    if (!hasPrefix(table, SERVER)) return { why: `'${NAME}' is also set outside its own table` };
+    if (!samePath(table, SERVER)) continue;  // a key in one of its own sub-tables, such as .env
+    const name = key.path[0];
+    if ((name === 'env_vars' || name === 'command') && (!key.bare || key.path.length > 1 || (name === 'env_vars' && !ENV_VARS_KEY.test(t))))
+      return { why: `the '${NAME}' table sets ${name} in a form this script does not edit` };
   }
-  return null;
+  return { start, end };
 }
 
 // What to do with the Codex config text. Returns {text, result}; text is null
@@ -245,18 +304,15 @@ export function planCodex(text, command) {
   const unsure = why => ({ text: null, result: `left alone: ${why}, so the file is uncertain to edit; make sure [mcp_servers.${NAME}] lists env_vars = ${tomlArray(ENV_NAMES)}` });
   if (!atStatement) return unsure('a multi-line or unterminated string');
   const isLine = (re, i) => atStatement[i] && re.test(lines[i].replace(/\r$/, ''));
-  const start = lines.findIndex((_, i) => isLine(CODEX_HEADER, i));
+  const where = locate(lines, atStatement);
+  if (where.why) return unsure(where.why);
+  const { start, end } = where;
+  if (start < 0 && atStatement.open) return unsure('an array is not closed');
   if (start < 0) {
-    const why = ambiguity(lines, atStatement, -1, -1);
-    if (why) return unsure(why);
     // A new table at the end of the file cannot capture keys that belong to
     // another one; the file ends outside any string (checked above).
     return { text: text + (text && !text.endsWith('\n') ? '\n' : '') + '\n' + fresh, result: 'registered' };
   }
-  let end = lines.findIndex((_, i) => i > start && isLine(ANY_HEADER, i));
-  if (end < 0) end = lines.length;
-  const why = ambiguity(lines, atStatement, start, end);
-  if (why) return unsure(why);
   const cmdRow = lines.findIndex((_, i) => i > start && i < end && isLine(COMMAND_KEY, i));
   if (cmdRow < 0 || !isOurCommand(tomlString(COMMAND_KEY.exec(lines[cmdRow])[1]), command)) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
 
