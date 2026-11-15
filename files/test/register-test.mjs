@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const modulePath = path.resolve(process.argv[2] || path.join(here, '..', 'register.mjs'));
-const { ENV_NAMES, RegisterError, planCodex, main } = await import(pathToFileURL(modulePath).href);
+const { ENV_NAMES, RegisterError, planCodex, isOurCommand, main } = await import(pathToFileURL(modulePath).href);
 
 const CMD = '/opt/sbx-chromium/bin/sbx-browser-mcp';
 const ENV_LINE = `env_vars = [${ENV_NAMES.map(n => JSON.stringify(n)).join(', ')}]`;
@@ -31,12 +31,13 @@ function sandbox(agentsOnPath = ['codex']) {
   for (const a of agentsOnPath) fs.writeFileSync(path.join(bin, a), '#!/bin/sh\n', { mode: 0o755 });
   const env = { HOME: home, PATH: bin };
   const config = path.join(home, '.codex', 'config.toml');
-  // main() reports on stderr; capture it so assertions can read it.
+  // main() reports on stderr; capture stdout and stderr so assertions can read
+  // everything it printed.
   const run = (...flags) => {
-    const lines = [], write = process.stderr.write;
-    process.stderr.write = chunk => { lines.push(String(chunk)); return true; };
+    const lines = [], err = process.stderr.write, out = process.stdout.write;
+    process.stderr.write = process.stdout.write = chunk => { lines.push(String(chunk)); return true; };
     try { return { failed: main([CMD, ...flags], env), out: lines.join('') }; }
-    finally { process.stderr.write = write; }
+    finally { process.stderr.write = err; process.stdout.write = out; }
   };
   return { root, env, config, run, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
@@ -129,6 +130,28 @@ test('user entries in every header spelling are left alone', () => {
   }
 });
 
+test('ownership is decided by the command (and legacy npx args) only', () => {
+  for (const c of [CMD, '/usr/local/bin/sbx-browser-mcp', 'chrome-devtools-mcp']) assert.equal(isOurCommand(c), true, c);
+  assert.equal(isOurCommand('npx', ['-y', 'chrome-devtools-mcp@latest', '--browser-url=http://127.0.0.1:9222']), true);
+  assert.equal(isOurCommand('npx', ['chrome-devtools-mcp']), true);
+  for (const [c, a] of [['/usr/bin/other', []], ['/home/me/my-sbx-browser-mcp-fork', []], ['sbx-browser-mcp.sh', []],
+    ['npx', ['other-mcp', '--note=chrome-devtools-mcp']], ['npx', []], [undefined, []], [['sbx-browser-mcp'], []]])
+    assert.equal(isOurCommand(c, a), false, JSON.stringify([c, a]));
+});
+
+test('a Codex user entry that only mentions the kit in a comment or another key stays user-owned', () => {
+  for (const before of [
+    '[mcp_servers.chrome-devtools]\ncommand = "/usr/bin/other" # formerly sbx-browser-mcp\n',
+    '[mcp_servers.chrome-devtools]\ncommand = "/home/me/my-sbx-browser-mcp-fork"\n',
+    '[mcp_servers.chrome-devtools]\ncommand = "/usr/bin/other"\nargs = ["--wrap", "/opt/sbx-chromium/bin/sbx-browser-mcp"]\n',
+    '[mcp_servers.chrome-devtools]\n# command = "/opt/sbx-chromium/bin/sbx-browser-mcp"\ncommand = "/usr/bin/other"\n',
+  ]) {
+    const { text, result } = planCodex(before, CMD);
+    assert.equal(text, null, before);
+    assert.match(result, /^left alone: /);
+  }
+});
+
 test('an unclosed env_vars array is a configuration error', () => {
   const before = `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = ["HTTP_PROXY",\n`;
   assert.throws(() => planCodex(before, CMD), e => e instanceof RegisterError && /not closed/.test(e.message));
@@ -191,13 +214,80 @@ test('--quiet hides progress but still reports failures, and other agents contin
   } finally { s.cleanup(); }
 });
 
-test('invalid JSON config is skipped with a message, not overwritten', () => {
-  const s = sandbox(['claude']);
+const MARKER = 'SYNTHETIC_REGISTER_SECRET_not_json';
+
+test('invalid JSON config is skipped with an actionable message that never quotes its content', () => {
+  const s = sandbox(['claude', 'gemini']);
   try {
-    const file = path.join(s.env.HOME, '.claude.json');
-    fs.writeFileSync(file, '{ not json');
-    assert.match(s.run().out, /claude: skipped: .*is not valid JSON/);
-    assert.equal(fs.readFileSync(file, 'utf8'), '{ not json');
+    const claude = path.join(s.env.HOME, '.claude.json'), gemini = path.join(s.env.HOME, '.gemini', 'settings.json');
+    fs.mkdirSync(path.dirname(gemini));
+    fs.writeFileSync(claude, MARKER);
+    fs.writeFileSync(gemini, `{"token": "${MARKER}", oops}`);
+    const { out } = s.run();
+    assert.match(out, /claude: skipped: .*\.claude\.json is not valid JSON; fix or remove it, then run sbx-browser-register again/);
+    assert.match(out, /gemini: skipped: .*settings\.json is not valid JSON; fix or remove it/);
+    assert.ok(!out.includes('SYNTHETIC'), 'config content leaked into the output');
+    assert.equal(fs.readFileSync(claude, 'utf8'), MARKER);
+  } finally { s.cleanup(); }
+});
+
+test('Codex messages never quote config content', () => {
+  const s = sandbox();
+  try {
+    for (const text of [
+      `secret = "${MARKER}"\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = ["${MARKER}",\n`,
+      `[mcp_servers.chrome-devtools]\ncommand = "/usr/bin/${MARKER}"\n`,
+      `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = [{ name = "${MARKER}" }]\n`,
+    ]) {
+      fs.writeFileSync(s.config, text);
+      const { out } = s.run();
+      assert.match(out, /codex: (failed|left alone): /);
+      assert.ok(!out.includes('SYNTHETIC'), `config content leaked: ${out}`);
+      assert.equal(fs.readFileSync(s.config, 'utf8'), text);
+    }
+  } finally { s.cleanup(); }
+});
+
+test('JSON user entries that mention the kit only in env or other keys are left alone', () => {
+  const s = sandbox(['claude', 'gemini', 'cursor-agent', 'opencode']);
+  try {
+    const H = s.env.HOME;
+    const files = {
+      claude: [path.join(H, '.claude.json'), { mcpServers: { 'chrome-devtools': { type: 'stdio', command: '/usr/bin/other', args: [], env: { NOTE: 'formerly sbx-browser-mcp' } } } }],
+      gemini: [path.join(H, '.gemini', 'settings.json'), { mcpServers: { 'chrome-devtools': { command: '/usr/bin/other', args: ['--note=chrome-devtools-mcp'] } } }],
+      cursor: [path.join(H, '.cursor', 'mcp.json'), { mcpServers: { 'chrome-devtools': { command: '/home/me/my-sbx-browser-mcp-fork', description: 'sbx-browser-mcp' } } }],
+      opencode: [path.join(H, '.config', 'opencode', 'opencode.json'), { mcp: { 'chrome-devtools': { type: 'local', command: ['/usr/bin/other', 'chrome-devtools-mcp-note'], environment: { X: 'sbx-browser-mcp' } } } }],
+    };
+    const before = {};
+    for (const [name, [file, doc]] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, before[name] = JSON.stringify(doc, null, 2) + '\n');
+    }
+    const { out } = s.run();
+    for (const [name, [file]] of Object.entries(files)) {
+      assert.match(out, new RegExp(`${name}: left alone: `), name);
+      assert.equal(fs.readFileSync(file, 'utf8'), before[name], name);
+    }
+  } finally { s.cleanup(); }
+});
+
+test('JSON entries that run the kit, including the v2 npx entry, are replaced; other keys kept', () => {
+  const s = sandbox(['claude', 'gemini', 'opencode']);
+  try {
+    const H = s.env.HOME;
+    const claude = path.join(H, '.claude.json'), gemini = path.join(H, '.gemini', 'settings.json'), opencode = path.join(H, '.config', 'opencode', 'opencode.json');
+    fs.writeFileSync(claude, JSON.stringify({ theme: 'dark', mcpServers: { other: { command: 'x' }, 'chrome-devtools': { command: 'npx', args: ['chrome-devtools-mcp@latest', '--browser-url=http://127.0.0.1:9222'] } } }));
+    fs.mkdirSync(path.dirname(gemini)); fs.mkdirSync(path.dirname(opencode), { recursive: true });
+    fs.writeFileSync(gemini, JSON.stringify({ mcpServers: { 'chrome-devtools': { command: '/old/prefix/bin/sbx-browser-mcp', args: [] } } }));
+    fs.writeFileSync(opencode, JSON.stringify({ mcp: { 'chrome-devtools': { type: 'local', command: ['/old/bin/sbx-browser-mcp'], enabled: true } } }));
+    const { out } = s.run();
+    for (const name of ['claude', 'gemini', 'opencode']) assert.match(out, new RegExp(`${name}: registered in `), name);
+    const c = JSON.parse(fs.readFileSync(claude, 'utf8'));
+    assert.equal(c.theme, 'dark'); assert.deepEqual(c.mcpServers.other, { command: 'x' });
+    assert.deepEqual(c.mcpServers['chrome-devtools'], { type: 'stdio', command: CMD, args: [], env: {} });
+    assert.deepEqual(JSON.parse(fs.readFileSync(gemini, 'utf8')).mcpServers['chrome-devtools'], { command: CMD, args: [] });
+    assert.deepEqual(JSON.parse(fs.readFileSync(opencode, 'utf8')).mcp['chrome-devtools'], { type: 'local', command: [CMD], enabled: true });
+    assert.match(s.run().out, /claude: already registered/);
   } finally { s.cleanup(); }
 });
 

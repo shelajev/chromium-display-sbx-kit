@@ -76,11 +76,15 @@ function mergeJson(file, key, entry, isOurs) {
   let doc = {};
   const raw = readOptional(file);
   if (raw?.trim()) {
+    // The parser's message quotes the input, which may hold secrets, so it
+    // is never shown.
     try { doc = JSON.parse(raw); } catch (e) {
       if (!(e instanceof SyntaxError)) throw e;
-      return `skipped: ${file} is not valid JSON (${e.message})`;
+      return `skipped: ${file} is not valid JSON; fix or remove it, then run sbx-browser-register again`;
     }
   }
+  if (!isObject(doc)) return `skipped: ${file} is not a JSON object; fix it, then run sbx-browser-register again`;
+  if (doc[key] !== undefined && !isObject(doc[key])) return `left alone: ${file} has a '${key}' that is not an object`;
   const servers = (doc[key] ??= {});
   const current = servers[NAME];
   if (current && JSON.stringify(current) === JSON.stringify(entry)) return 'already registered';
@@ -90,9 +94,19 @@ function mergeJson(file, key, entry, isOurs) {
   return `registered in ${file}`;
 }
 
-// The v2 kit's entry (npx chrome-devtools-mcp --browser-url=…:9222) counts as
-// ours too, so upgrading replaces it instead of leaving it behind.
-const mentionsUs = text => text.includes('sbx-browser-mcp') || text.includes('chrome-devtools-mcp');
+const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+// An entry is this kit's only by what it runs: this kit's server, or the v2
+// kit's `npx chrome-devtools-mcp …` / a direct chrome-devtools-mcp, so
+// upgrading replaces those instead of leaving them behind. Comments, env and
+// other keys never decide it.
+const base = p => typeof p === 'string' ? p.split('/').pop() : '';
+export function isOurCommand(command, args = []) {
+  const name = base(command);
+  if (name === 'sbx-browser-mcp' || name === 'chrome-devtools-mcp') return true;
+  return name === 'npx' && Array.isArray(args) && args.some(a => typeof a === 'string' && /^chrome-devtools-mcp(@[^\s/]*)?$/.test(a));
+}
+const ownsCommandEntry = e => isObject(e) && isOurCommand(e.command, e.args);
+const ownsOpencodeEntry = e => isObject(e) && Array.isArray(e.command) && isOurCommand(e.command[0], e.command.slice(1));
 
 // ── Codex: TOML, edited in place without a TOML library ──────────────────────
 // Only the lines of our own table are ever touched; everything else in the
@@ -101,6 +115,12 @@ const CODEX_HEADER = /^\s*\[\s*mcp_servers\s*\.\s*(?:chrome-devtools|"chrome-dev
 const ANY_HEADER = /^\s*\[\[?\s*[^\]"'=]*(?:"[^"]*"|'[^']*')?[^\]=]*\]\]?\s*(?:#.*)?$/;
 const COMMAND_KEY = /^\s*command\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')/;
 const ENV_VARS_KEY = /^(\s*env_vars\s*=\s*)\[/;
+// The value of a quoted TOML string; basic strings use JSON-compatible escapes
+// for any path this kit writes, and anything else is not this kit's.
+function tomlString(quoted) {
+  if (quoted.startsWith("'")) return quoted.slice(1, -1);
+  try { return JSON.parse(quoted); } catch (e) { if (e instanceof SyntaxError) return null; throw e; }
+}
 const tomlArray = names => `[${names.map(n => JSON.stringify(n)).join(', ')}]`;
 
 // From `[` at lines[row][col], the position just after the matching `]`,
@@ -137,8 +157,7 @@ export function planCodex(text, command) {
   let end = lines.findIndex((l, i) => i > start && ANY_HEADER.test(l.replace(/\r$/, '')));
   if (end < 0) end = lines.length;
   const cmdRow = lines.findIndex((l, i) => i > start && i < end && COMMAND_KEY.test(l));
-  const cmd = cmdRow < 0 ? '' : COMMAND_KEY.exec(lines[cmdRow])[1];
-  if (!mentionsUs(cmd)) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
+  if (cmdRow < 0 || !isOurCommand(tomlString(COMMAND_KEY.exec(lines[cmdRow])[1]))) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
 
   // Ours, possibly from a release that did not pass the environment through.
   const envRow = lines.findIndex((l, i) => i > start && i < end && ENV_VARS_KEY.test(l));
@@ -179,25 +198,25 @@ export function agents(command, env) {
       present: () => onPath('claude', env.PATH),
       // User scope: top-level mcpServers in ~/.claude.json.
       run: () => mergeJson(path.join(home, '.claude.json'), 'mcpServers',
-        { type: 'stdio', command, args: [], env: {} }, e => mentionsUs(JSON.stringify(e))),
+        { type: 'stdio', command, args: [], env: {} }, ownsCommandEntry),
     },
     {
       name: 'gemini',
       present: () => onPath('gemini', env.PATH),
       run: () => mergeJson(path.join(home, '.gemini', 'settings.json'), 'mcpServers',
-        { command, args: [] }, e => mentionsUs(JSON.stringify(e))),
+        { command, args: [] }, ownsCommandEntry),
     },
     {
       name: 'cursor',
       present: () => onPath('cursor-agent', env.PATH),
       run: () => mergeJson(path.join(home, '.cursor', 'mcp.json'), 'mcpServers',
-        { command, args: [] }, e => mentionsUs(JSON.stringify(e))),
+        { command, args: [] }, ownsCommandEntry),
     },
     {
       name: 'opencode',
       present: () => onPath('opencode', env.PATH),
       run: () => mergeJson(path.join(home, '.config', 'opencode', 'opencode.json'), 'mcp',
-        { type: 'local', command: [command], enabled: true }, e => mentionsUs(JSON.stringify(e))),
+        { type: 'local', command: [command], enabled: true }, ownsOpencodeEntry),
     },
     {
       name: 'codex',
