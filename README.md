@@ -76,7 +76,7 @@ Ask the agent to open a page — it uses the MCP tools. In the shell:
 | `sbx-chrome <url>` | open a URL in a new tab |
 | `sbx-chrome status \| stop \| restart` | manage it |
 | `chromium --headless --screenshot=out.png <url>` | one-shot runs, separate from the shared browser |
-| `sbx-browser-register` | re-add the MCP entry to installed agents' configs |
+| `sbx-browser-register` | re-add or upgrade the MCP entry in installed agents' configs |
 
 The shared browser listens on `127.0.0.1:9222`
 (`CHROME_REMOTE_DEBUGGING_PORT`), keeps its profile in
@@ -125,6 +125,18 @@ Each process has its own environment: terminal exports do not update a running b
 Run `sbx-chrome diag` in the sandbox shell, even with Chromium stopped. It reads only its own invocation environment, not the environment of a separate running agent or MCP server. `proxyCallerEnvironment` describes that invocation's configuration; `proxyRunningBrowser` describes the recorded browser launch and whether it matches the caller. These are configuration records, not an attestation of live network traffic. Diagnostics omit proxy URLs and credentials.
 
 Use `SBX_PROXY_MODE=direct` only for a user-requested bypass, and restart to switch an existing browser. Direct mode loses credential injection and HTTP request rules; network-level sandbox restrictions remain. Proxy injection does not keep website passwords, login cookies, or other browser-profile data out of the guest or hide them from its same-user agent.
+
+### What each agent passes to the MCP server
+
+The agent starts `sbx-browser-mcp`, so the browser that server starts or attaches to gets only the variables the agent passes on. It needs the proxy and CA names above, plus the display and GPU controls. Those are exactly the names the kit's `sbx-chrome --if-display` startup hook declares: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` (each also in lowercase), `SSL_CERT_FILE`, `PROXY_CA_CERT_B64`, `SBX_PROXY_CA_FILE`, `SBX_PROXY_MODE`, `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_RUNTIME_DIR`, `SBX_WAYLAND_SOCKET`, `SBX_CHROME_HEADLESS`, `SBX_CHROME_DISABLE_GPU`. If the proxy variables are missing while the sandbox CA is present, the browser refuses to start or attach rather than bypass the proxy.
+
+- **Codex** (checked with 0.166.0). Codex starts stdio MCP servers with a cleared environment. It passes only a core set (`HOME`, `PATH`, locale, `TMPDIR`, …), CA-bundle paths such as `SSL_CERT_FILE`, and the names listed in the server's `env_vars`. So the kit's entry lists the names above in `env_vars`. It records names only; no value is written to `config.toml`. `sbx-browser-register`, which runs at every boot, adds `env_vars` to an entry written by kit releases 2.0.0–2.0.2 and keeps that entry's other settings. In an existing `env_vars` list it keeps your own names and adds only the missing ones. It leaves an `env_vars` written with inline tables or comments unchanged and prints the names to add. It never edits a `chrome-devtools` entry that runs a different command; add the names to that entry yourself. Restart a running Codex session after an upgrade, because it has already read its configuration.
+- **Claude Code** (checked with 2.1.318). By default, MCP servers inherit the agent's full environment. With `CLAUDE_CODE_MCP_ALLOWLIST_ENV=1`, none of the names above reach the server, so the browser refuses to start or attach. The kit's entry does not change that setting. With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`, `XDG_RUNTIME_DIR` is dropped and display discovery falls back to the standard runtime directories.
+- **OpenCode** (checked with 1.19.5). MCP servers inherit the full environment.
+- **Gemini CLI** (checked with 0.67.0). Gemini removes variables whose names match credential patterns, including `CERT`, so `SSL_CERT_FILE` and `PROXY_CA_CERT_B64` never reach the server; the proxy variables do. The browser still finds the sandbox CA at `/usr/local/share/ca-certificates/proxy-ca.crt`, or in the sandbox block of the system CA bundle. In an environment that supplies the CA only through `PROXY_CA_CERT_B64`, the browser refuses to start. Gemini also starts user-level stdio MCP servers only in a trusted folder. Both are Gemini policies, and the kit does not override them.
+- **Cursor**. Cursor's documentation does not say what environment its MCP servers receive, and this release did not test it. If a browser tool reports that no proxy variable reached the browser, the agent dropped them.
+
+The Codex, Claude Code, OpenCode and Gemini findings come from each client's source and an isolated probe of the names its MCP child receives. Only Codex was also run against the kit's real browser.
 
 ## How it works
 
