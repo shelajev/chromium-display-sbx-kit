@@ -81,12 +81,15 @@ export async function maintain(options={}) {
     if(!['schedule','workflow_dispatch'].includes(options.eventName || 'workflow_dispatch')) throw new Error('invalid event name');
     if(allow.size && ((options.eventName || 'workflow_dispatch')!=='workflow_dispatch' || !options.securityJustification?.trim()))
       throw new Error('Urgent exceptions require workflow_dispatch, exact component=pin and a security justification');
-    for(const entry of allow) if(!/^(chromium|devtoolsMcp|kit-tck|debian|debian-base|node)=\S+$/.test(entry)) throw new Error('invalid exact security target: '+entry);
+    for(const entry of allow) if(!/^(chromium|nss|devtoolsMcp|kit-tck|debian|debian-base|node)=\S+$/.test(entry)) throw new Error('invalid exact security target: '+entry);
     const yaml=texts.get('chromium-display.yaml');
     const readArg=name=>yaml.match(new RegExp('  '+name+':\\n    default: "([^"]+)"'))?.[1];
     const current=readArg('chromium')+'-'+readArg('chromiumDebianRevision');
     const deb=options.debianBase || 'https://deb.debian.org';
     const records=new Map(arches.map(a=>[a,new Map()]));
+    // NSS: libnss3 and libnss3-tools (certutil), one version for both.
+    const nssPackages=['libnss3','libnss3-tools'];
+    const nssRecords=new Map(arches.map(a=>[a,new Map()]));
     for(const [repo,suite] of [['debian-security','trixie-security'],['debian','trixie-updates'],['debian','trixie']]) {
       for(const arch of arches) {
         const url=deb+'/'+repo+'/dists/'+suite+'/main/binary-'+arch+'/Packages.xz';
@@ -94,6 +97,16 @@ export async function maintain(options={}) {
         const r=await request(url);
         const data=execFileSync('xz',['-dc'],{input:r.body,maxBuffer:100*1024*1024}).toString();
         for(const stanza of data.split(/\n\n/)) {
+          const nssName=stanza.match(/^Package: (libnss3|libnss3-tools)$/m)?.[1];
+          if(nssName) {
+            const fields=Object.fromEntries(stanza.split('\n').filter(l=>/^[A-Za-z-]+: /.test(l)).map(l=>[l.slice(0,l.indexOf(':')),l.slice(l.indexOf(':')+2)]));
+            if(fields.Architecture!==arch || !/^\d+:[0-9][0-9A-Za-z.+~-]*$/.test(fields.Version)) continue;
+            if(!new RegExp('^pool/(?:updates/)?main/n/nss/'+nssName+'_[^/]+\\.deb$').test(fields.Filename)) throw new Error('invalid Debian Filename');
+            const byVersion=nssRecords.get(arch);
+            if(!byVersion.has(fields.Version)) byVersion.set(fields.Version,{});
+            byVersion.get(fields.Version)[nssName] ??= deb+'/'+repo+'/'+fields.Filename;
+            continue;
+          }
           if(!/^Package: chromium$/m.test(stanza)) continue;
           const fields=Object.fromEntries(stanza.split('\n').filter(l=>/^[A-Za-z-]+: /.test(l)).map(l=>[l.slice(0,l.indexOf(':')),l.slice(l.indexOf(':')+2)]));
           if(fields.Architecture!==arch || !/^\d+(?:\.\d+){3}-[0-9A-Za-z.+~]+$/.test(fields.Version) || +fields.Version.split('.')[0]<150) continue;
@@ -131,6 +144,35 @@ export async function maintain(options={}) {
     const split=selected.lastIndexOf('-');
     replace('chromium-display.yaml','default: "'+readArg('chromium')+'"','default: "'+selected.slice(0,split)+'"');
     replace('chromium-display.yaml','default: "'+readArg('chromiumDebianRevision')+'"','default: "'+selected.slice(split+1)+'"');
+
+    // NSS follows the same rules as chromium: both architectures, both
+    // packages at one version, every artifact at least seven days old for a
+    // new pin, the current pin retained, disappearance reported.
+    const nss=readArg('nss');
+    if(!nss) throw new Error('nss pin not found in chromium-display.yaml');
+    const nssComplete=(arch,v)=>nssPackages.every(p=>nssRecords.get(arch).get(v)?.[p]);
+    let nssPresent=arches.every(a=>nssComplete(a,nss));
+    for(const arch of arches) for(const p of nssPackages) {
+      const url=nssRecords.get(arch).get(nss)?.[p];
+      if(url && !await request(url,{method:'HEAD',missing:true})) nssPresent=false;
+    }
+    if(!nssPresent) report.notes.push('MIRROR DISAPPEARANCE: current NSS '+nss+' (libnss3, libnss3-tools) no longer installable from configured apt indices on both architectures');
+    const nssCommon=[...nssRecords.get('amd64').keys()].filter(v=>arches.every(a=>nssComplete(a,v))).sort((a,b)=>debianCompare(b,a));
+    for(const arch of arches) for(const v of nssRecords.get(arch).keys())
+      if(debianCompare(v,nss)>0 && !nssCommon.includes(v)) report.notes.push('NSS '+v+': not complete (libnss3 + libnss3-tools) on both architectures; common pin required');
+    let nssSelected=null;
+    for(const v of nssCommon.filter(v=>debianCompare(v,nss)>=0)) {
+      const dates=[];
+      for(const arch of arches) for(const p of nssPackages) {
+        const r=await request(nssRecords.get(arch).get(v)[p],{method:'HEAD',missing:true});
+        if(r) dates.push(r.headers['last-modified']);
+      }
+      if(dates.length!==arches.length*nssPackages.length) {report.notes.push('NSS '+v+': artifact missing on at least one architecture');continue;}
+      if(v===nss || dates.map(d=>eligible('nss',v,d)).every(Boolean)) {nssSelected=v;break;}
+    }
+    if(!nssSelected) throw new Error('No eligible common NSS replacement for '+nss+(nssPresent?'':' (mirror disappearance)')+'. See cooldown maturity times; retry after seven days or manually dispatch urgent_security_allow=nss=<exact-version> with justification.');
+    change('nss',nss,nssSelected);
+    replace('chromium-display.yaml','default: "'+nss+'"','default: "'+nssSelected+'"');
 
     const npm=options.npmBase || 'https://registry.npmjs.org';
     const npmUrl=npm+'/chrome-devtools-mcp';report.sources.push(npmUrl);

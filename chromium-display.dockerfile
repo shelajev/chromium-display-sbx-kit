@@ -38,6 +38,7 @@ FROM debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a47
 ARG PREFIX
 ARG CHROMIUM_VERSION
 ARG CHROMIUM_DEBIAN_REVISION
+ARG NSS_VERSION
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # debian:trixie carries no CA store, and apt goes over HTTPS here: plain HTTP
@@ -67,9 +68,15 @@ echo "Acquire::https::CAInfo \"$ca\";" > /etc/apt/apt.conf.d/99ca
 apt-get update
 apt-get install -y --no-install-recommends \
   "chromium=${CHROMIUM_VERSION}-${CHROMIUM_DEBIAN_REVISION}" \
-  fontconfig fonts-liberation fonts-dejavu-core fonts-noto-color-emoji xkb-data
+  fontconfig fonts-liberation fonts-dejavu-core fonts-noto-color-emoji xkb-data \
+  "libnss3=${NSS_VERSION}" "libnss3-tools=${NSS_VERSION}"
 rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99ca
 /usr/lib/chromium/chromium --version | grep -q "^Chromium ${CHROMIUM_VERSION} "
+# certutil (libnss3-tools) and the libnss3 it and Chromium load are one NSS
+# build, pinned exactly like chromium and renewed by tools/maintain-pins.mjs
+# (`nss` arg). A stale pin fails above with "Version … not found".
+test "$(dpkg-query -W -f='${Version}' libnss3)" = "$NSS_VERSION"
+test "$(dpkg-query -W -f='${Version}' libnss3-tools)" = "$NSS_VERSION"
 EOF
 
 COPY files/fonts.conf /tmp/fonts.conf
@@ -82,6 +89,10 @@ install -d "$PREFIX/lib" "$PREFIX/etc/fonts" "$PREFIX/share/X11" "$PREFIX/var/ca
 # aids for GPU driver work; nothing in a sandbox loads them.
 cp -a /usr/lib/chromium "$PREFIX/chromium"
 rm -f "$PREFIX"/chromium/libVkLayer_khronos_validation.so* "$PREFIX"/chromium/libVkICD_mock_icd.so*
+# certutil puts the sandbox proxy CA into the user's NSS database, the only
+# local trust store Chromium on Linux reads (see libexec/proxy-trust.mjs).
+install -d "$PREFIX/libexec"
+cp -L /usr/bin/certutil "$PREFIX/libexec/certutil"
 
 # Libraries Chromium opens by name at run time, which ldd cannot see. NSS
 # locates its crypto modules beside libnss3, which is why they land in the
@@ -98,7 +109,7 @@ done
 # glibc, which must come from the base because its loader is the base's.
 # libstdc++ and libgcc_s are kept on purpose — the platform floor does not
 # promise them, and the bundled node needs them too.
-{ ldd "$PREFIX/chromium/chromium" "$PREFIX/chromium/chrome_crashpad_handler"
+{ ldd "$PREFIX/chromium/chromium" "$PREFIX/chromium/chrome_crashpad_handler" "$PREFIX/libexec/certutil"
   for f in "$PREFIX"/chromium/*.so* $dlopened; do ldd "$f" || true; done
 } | awk '$2 == "=>" && $3 ~ /^\// {print $3}' | sort -u \
   | grep -Ev '/(libc|libm|libdl|libpthread|librt|libresolv|libutil|libanl|libmvec|ld-linux[^/]*)\.so' \
@@ -118,7 +129,7 @@ cp -a /usr/share/X11/xkb "$PREFIX/share/X11/xkb"
 
 # Licences travel with the binaries: an image is a distribution.
 install -d "$PREFIX/share/doc"
-for pkg in chromium fonts-liberation fonts-dejavu-core fonts-noto-color-emoji; do
+for pkg in chromium fonts-liberation fonts-dejavu-core fonts-noto-color-emoji libnss3-tools; do
   cp -L "/usr/share/doc/$pkg/copyright" "$PREFIX/share/doc/$pkg.copyright"
 done
 EOF
@@ -159,11 +170,12 @@ ARG DEVTOOLS_MCP_VERSION
 COPY --from=chromium $PREFIX $PREFIX
 COPY --from=mcp $PREFIX $PREFIX
 COPY --chmod=0755 files/sbx-chromium files/sbx-chrome files/sbx-browser-mcp files/sbx-browser-register $PREFIX/bin/
-COPY files/register.mjs files/display.sh files/wayland-probe.mjs files/lifecycle.mjs $PREFIX/libexec/
+COPY files/register.mjs files/display.sh files/wayland-probe.mjs files/lifecycle.mjs files/proxy-trust.mjs $PREFIX/libexec/
 COPY files/test /tmp/test
 RUN <<'EOF'
 set -eu
-sed -i "s|@PREFIX@|$PREFIX|g" "$PREFIX"/bin/* "$PREFIX"/libexec/*
+# Scripts only: libexec also holds the certutil binary.
+sed -i "s|@PREFIX@|$PREFIX|g" "$PREFIX"/bin/* "$PREFIX"/libexec/*.sh "$PREFIX"/libexec/*.mjs
 # npm tarballs and Debian packages both arrive root-owned here, but normalise
 # anyway: a foreign uid in an overlay is a real account on some base.
 chown -R 0:0 "$PREFIX"
@@ -182,7 +194,9 @@ sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.
 # Separate commands, not `update && install`: set -e does not stop on the left
 # side of an && list, and that once let this step "pass" without curl.
 apt-get update
-apt-get install -y --no-install-recommends curl
+# openssl only mints the synthetic CAs and certificates for proxy-ca-test.mjs;
+# like curl, it stays in this stage and never reaches the overlay.
+apt-get install -y --no-install-recommends curl openssl
 curl --version | head -1
 rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99ca
 EOF

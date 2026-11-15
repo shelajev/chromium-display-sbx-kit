@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { discover } from './wayland-probe.mjs';
+import { plan as proxyPlan, describe as describeProxy, launchRecord, routeSeal, routeMatches, ProxyError, isFsError } from './proxy-trust.mjs';
 const prefix = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const portText = process.env.CHROME_REMOTE_DEBUGGING_PORT || '9222';
 if (!/^[1-9][0-9]{0,4}$/.test(portText) || Number(portText) > 65535) {
@@ -181,11 +182,62 @@ async function openUrl(url) {
     ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP tab connection failed')); }, {once: true});
   });
 }
+// The caller's proxy configuration, checked before any start, reuse or
+// restart: an invalid one fails closed. sbx-chromium repeats the check at
+// launch and installs the CA.
+function callerProxy() {
+  try { return proxyPlan(process.env); }
+  catch (e) { if (e instanceof ProxyError) throw new Error(`proxy setup failed: ${e.message}; not starting or reusing the browser`); throw e; }
+}
+// The launch record, as one of: {status: 'ok', session}; 'absent' (no file);
+// 'malformed' (not a JSON object; nothing trustworthy is recorded);
+// 'unreadable' with the error code (it exists but cannot be read, which is
+// not the same as absent). Anything else propagates.
+function readLaunchRecord() {
+  let text;
+  try { text = fs.readFileSync(`${state}/session.json`, 'utf8'); }
+  catch (e) {
+    if (isFsError(e) && e.code === 'ENOENT') return {status: 'absent'};
+    if (isFsError(e)) return {status: 'unreadable', code: e.code};
+    throw e;
+  }
+  let session;
+  try { session = JSON.parse(text); }
+  catch (e) { if (e instanceof SyntaxError) return {status: 'malformed'}; throw e; }
+  return session && typeof session === 'object' && !Array.isArray(session) ? {status: 'ok', session} : {status: 'malformed'};
+}
+// The record for this browser process: one written for another PID/port is
+// not this browser's record.
+function recordedSession(pid) {
+  const record = readLaunchRecord();
+  if (record.status === 'ok' && !(record.session.pid === pid && record.session.port === port)) return {status: 'absent'};
+  return record;
+}
+// A caller that needs the sandbox proxy only reuses a browser that sbx-chrome
+// recorded launching through it with the same CA. Anything else (direct,
+// unrecorded, another CA) is refused rather than silently reused; the person
+// decides to restart it. This compares launch records, not the live route.
+function assertReusable(caller, pid) {
+  if (caller.mode !== 'proxy') return;
+  const record = recordedSession(pid);
+  if (record.status === 'unreadable') throw new Error(`cannot read the launch record ${state}/session.json (${record.code}), so the running browser cannot be reused through the sandbox proxy; it is left running. Fix the file's permissions, or run \`sbx-chrome restart\` (or \`sbx-chrome stop\`); the profile is kept`);
+  const recorded = record.session?.proxy;
+  const same = routeMatches(recorded, caller);
+  const why = record.status === 'malformed' ? 'its launch record is malformed'
+    : same === null ? 'its proxy configuration was not recorded'
+    : recorded.mode !== 'proxy' ? `it was launched in ${recorded.mode} mode`
+    : recorded.caSha256 !== caller.ca.fingerprint ? 'it was launched trusting a different sandbox CA'
+    : !same ? 'it was launched with different proxy endpoints or NO_PROXY bypass rules' : null;
+  if (why) throw new Error(`the running browser cannot be reused through the sandbox proxy: ${why}. Run \`sbx-chrome restart\` to relaunch it with the current configuration (or \`sbx-chrome stop\`); the profile is kept`);
+}
 async function start(url) {
+  const caller = callerProxy();
+  const proxy = {...launchRecord(caller), ...routeSeal(caller)};
   let pids = browserPids();
   if (pids.length > 1) throw new Error('multiple managed browser processes; leaving sessions intact for inspection');
   if (pids.length) {
     if (!await probe()) throw new Error('managed browser exists but CDP is unhealthy; leaving session intact');
+    assertReusable(caller, pids[0]);
     await openUrl(url); return;
   }
   if (await occupied()) throw new Error(`CDP port ${port} is occupied by another session; leaving it intact`);
@@ -203,7 +255,7 @@ async function start(url) {
   while (Date.now() < deadline) {
     pids = browserPids();
     if (pids.length === 1 && await probe()) {
-      fs.writeFileSync(`${state}/session.json`, JSON.stringify({mode, displaySocket: displaySocket || null, port, pid: pids[0]}), {mode: 0o600});
+      fs.writeFileSync(`${state}/session.json`, JSON.stringify({mode, displaySocket: displaySocket || null, port, pid: pids[0], proxy}), {mode: 0o600});
       console.error(`sbx-chrome: Chromium (${mode}) ready at ${endpoint}`); return;
     }
     if (exited && !pids.length) throw new Error(`Chromium exited before CDP readiness; inspect local ${state}/chrome.log (may contain browsing data)`);
@@ -244,11 +296,26 @@ async function stop() {
 }
 async function diag() {
   const pids = browserPids(); const version = await probe();
-  let session = {}; try { session = JSON.parse(fs.readFileSync(`${state}/session.json`)); } catch {}
-  if (session.pid !== pids[0] || session.port !== port) session = {};
+  const record = pids.length ? recordedSession(pids[0]) : {status: 'absent'};
+  const session = record.status === 'ok' ? record.session : {};
   let singleton = 'absent'; try { fs.lstatSync(`${profile}/SingletonLock`); singleton = 'present'; } catch {}
   const displays = await discover();
-  console.log(JSON.stringify({running: !!pids.length, pids, mode: pids.length ? session.mode || 'unknown' : 'stopped', displaySocket: pids.length ? session.displaySocket : null, port, cdpHealthy: !!version && !!pids.length, targetCount: version && ownedListener() ? (await json('/json/list'))?.length ?? null : null, profile, singleton, proxy: 'direct / --no-proxy-server', displayCandidates: displays.results.map(({path, kind, globals}) => ({path, kind, globals}))}, null, 2));
+  // Two different things, labelled as such. The running browser's entry is
+  // what sbx-chrome recorded when it launched that process (or unknown); it
+  // does not attest the live network route. The caller's entry is what a
+  // start from this environment would use.
+  // Only the public fields of the record; the route key and digest stay in
+  // session.json. matchesCallerRoute compares records, never live traffic.
+  let callerPlan = null; try { callerPlan = proxyPlan(process.env); } catch (e) { if (!(e instanceof ProxyError)) throw e; }
+  const recorded = session.proxy, same = recorded && callerPlan ? routeMatches(recorded, callerPlan) : null;
+  const proxyRunningBrowser = !pids.length ? null : recorded
+    ? {mode: recorded.mode, http: recorded.http, https: recorded.https, all: recorded.all, noProxyLoopback: recorded.noProxyLoopback,
+       caSha256: recorded.caSha256, matchesCallerRoute: same === null ? 'unknown' : same,
+       source: 'recorded by sbx-chrome at launch; not a check of the live network route'}
+    : {mode: 'unknown', matchesCallerRoute: 'unknown',
+       source: record.status === 'unreadable' ? `launch record unreadable (${record.code})`
+         : record.status === 'malformed' ? 'launch record malformed' : 'not recorded for this browser process'};
+  console.log(JSON.stringify({running: !!pids.length, pids, mode: pids.length ? session.mode || 'unknown' : 'stopped', displaySocket: pids.length ? session.displaySocket : null, port, cdpHealthy: !!version && !!pids.length, targetCount: version && ownedListener() ? (await json('/json/list'))?.length ?? null : null, profile, singleton, proxyRunningBrowser, proxyCallerEnvironment: describeProxy(process.env), displayCandidates: displays.results.map(({path, kind, globals}) => ({path, kind, globals}))}, null, 2));
 }
 const [command = 'start', ...rest] = process.argv.slice(2);
 try {
@@ -262,7 +329,8 @@ try {
         console.log(JSON.stringify(v));
       } else if (['diag', 'doctor'].includes(command)) await diag();
       else if (command === 'stop') await stop();
-      else if (command === 'restart') { await stop(); await start(rest[0]); }
+      // Validate before stopping, so a bad configuration never takes the browser down.
+      else if (command === 'restart') { callerProxy(); await stop(); await start(rest[0]); }
       else if (command === '--if-display') {
         const r = spawnSync('/bin/sh', ['-c', '. "$1/libexec/display.sh"; sbx_detect_display || exit; test "$SBX_OZONE" != headless', 'display', prefix], {env: {...process.env, PREFIX: prefix}, encoding: 'utf8'});
         if (r.stderr) process.stderr.write(r.stderr);

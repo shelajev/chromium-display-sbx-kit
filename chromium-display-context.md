@@ -24,6 +24,7 @@ headless.
   <url>`, `--dump-dom`, `--print-to-pdf=out.pdf`.
 - Sites outside the sandbox's network policy fail to load; that is the policy,
   not the browser. Tell the user which host was blocked.
+- The browser uses SBX's supplied proxy and CA automatically. Default `auto` requires the proxy when proxy inputs are configured; explicit `SBX_PROXY_MODE=proxy` always requires it. In either case, invalid configuration or a direct, unknown, or mismatched managed launch is refused. Compatible reuse requires the same proxy endpoint, CA, and exact applied `NO_PROXY` text. Report the error; never add certificate-error bypasses. There is no automatic restart. Use a valid guest launch environment and deliberate `sbx-chrome restart` to apply changed settings while keeping the profile. Invalid restart inputs preserve the old browser; `sbx-chrome stop` remains available. Terminal exports do not update a running agent or MCP server; changing its environment requires restarting that process too. Set `SBX_PROXY_MODE=direct` only when the user asks; restarting in that mode bypasses credential injection and HTTP request rules, while network-level sandbox restrictions remain. Browser logins and cookies remain guest profile data accessible to the same-user agent.
 - The profile (`~/.config/sbx-chromium/profile`) keeps cookies and logins
   between runs. Do not sign in to accounts unless the user asked you to.
 
@@ -37,9 +38,8 @@ Plain `sbx-chromium --headless` and version queries bypass display discovery.
 
 Chromium negotiates GPU use by default. With no render device exposed inside the sandbox, it uses software rendering. That fallback has been tested; Mac/VFIO hardware acceleration has not. To force software rendering regardless of the available device, set `SBX_CHROME_DISABLE_GPU=1` in the browser's guest launch environment before starting or restarting Chromium. Inspect the selected path in `chrome://gpu` or the GPU fields returned by `SystemInfo.getInfo` through the Chrome DevTools Protocol (CDP).
 
-Use `sbx-chrome diag` for safe metadata (mode, socket capabilities, managed PIDs,
-CDP health, target count and lock presence). It excludes URLs, titles, cookies
-and page content. Do not export profile files or browser logs as diagnostics.
+Use `sbx-chrome diag` for mode, socket capabilities, managed PIDs, Chrome DevTools Protocol (CDP) health, target count, lock presence, and proxy configuration metadata. It separates `proxyRunningBrowser` (recorded launch, not live-route attestation) from `proxyCallerEnvironment` (the current invocation). It works when Chromium is stopped and excludes URLs, credentials, titles, cookies, and page content.
+Do not export profile files or browser logs as diagnostics.
 A live profile owner or foreign CDP listener is left intact; investigate the
 profile/port configuration rather than deleting locks or killing processes.
 `sbx-chrome restart [URL]` gracefully flushes the persistent profile; the MCP

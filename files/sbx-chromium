@@ -19,10 +19,47 @@ export FONTCONFIG_FILE="$PREFIX/etc/fonts/fonts.conf"
 export XKB_CONFIG_ROOT="$PREFIX/share/X11/xkb"
 export CHROME_WRAPPER="$0"
 
-# Go direct and let the sandbox's transparent proxy carry the traffic: the
-# forward proxy re-signs TLS with its own CA, which Chromium's root store does
-# not trust. Network policy still applies on the transparent path.
-unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+# Route through the sandbox's forward proxy — the only path where SBX injects
+# credentials and applies HTTP rules — and trust its CA via the user's NSS
+# database (proxy-trust.mjs). The proxy stays in the environment, never in
+# argv. Any trust or configuration failure stops the launch: there is no
+# fallback to a direct connection. SBX_PROXY_MODE=direct opts out explicitly.
+# Only an invocation made of nothing but version flags skips this.
+version_only=0
+for arg in "$@"; do
+  case "$arg" in --version|--product-version) version_only=1 ;; *) version_only=0; break ;; esac
+done
+proxy_mode=none
+if [ "$version_only" = 0 ]; then
+  proxy_mode=$("$PREFIX/node/bin/node" "$PREFIX/libexec/proxy-trust.mjs" prepare "$@") || exit 1
+fi
+case "$proxy_mode" in
+  proxy)
+    # Chromium reads the lowercase spellings; the helper rejected disagreeing
+    # pairs, so either spelling is the configured value. Loopback (DevTools,
+    # local servers) never goes through the proxy. proxy-trust.mjs
+    # appliedNoProxy() mirrors this no_proxy construction exactly; the route
+    # identity sbx-chrome records is sealed over that text.
+    http_proxy=${http_proxy:-${HTTP_PROXY:-}} https_proxy=${https_proxy:-${HTTPS_PROXY:-}}
+    all_proxy=${all_proxy:-${ALL_PROXY:-}} no_proxy=${no_proxy:-${NO_PROXY:-}}
+    for host in 127.0.0.1 localhost ::1; do
+      case ",$no_proxy," in *",$host,"*) ;; *) no_proxy="${no_proxy:+$no_proxy,}$host" ;; esac
+    done
+    HTTP_PROXY=$http_proxy HTTPS_PROXY=$https_proxy ALL_PROXY=$all_proxy NO_PROXY=$no_proxy
+    export http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+    [ -n "$http_proxy" ] || unset http_proxy HTTP_PROXY
+    [ -n "$https_proxy" ] || unset https_proxy HTTPS_PROXY
+    [ -n "$all_proxy" ] || unset all_proxy ALL_PROXY
+    # A detected desktop makes Chromium read GNOME/KDE proxy settings instead
+    # of the environment.
+    unset XDG_CURRENT_DESKTOP DESKTOP_SESSION GNOME_DESKTOP_SESSION_ID KDE_FULL_SESSION KDE_SESSION_VERSION
+    ;;
+  direct|none)
+    unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+    set -- --no-proxy-server "$@"
+    ;;
+  *) echo "sbx-chromium: unexpected proxy mode" >&2; exit 1 ;;
+esac
 
 # Chromium honours only the last --enable-features, so a caller's list is
 # merged with ours instead of silently dropping WebMCP.
@@ -61,6 +98,5 @@ exec "$PREFIX/chromium/chromium" \
   --no-first-run \
   --no-default-browser-check \
   --password-store=basic \
-  --no-proxy-server \
   --enable-features="$features" \
   "$@"

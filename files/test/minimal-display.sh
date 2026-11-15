@@ -8,7 +8,7 @@ trap 'rm -rf "$root"' EXIT HUP INT TERM
 install -d "$root/bin" "$root$PREFIX/node/bin" "$root$PREFIX/libexec" "$root$PREFIX/lib" "$root$PREFIX/chromium"
 cp -L /bin/sh "$root/bin/sh"
 cp -L "$PREFIX/node/bin/node" "$root$PREFIX/node/bin/node"
-cp "$PREFIX/libexec/display.sh" "$PREFIX/libexec/wayland-probe.mjs" "$root$PREFIX/libexec/"
+cp "$PREFIX/libexec/display.sh" "$PREFIX/libexec/wayland-probe.mjs" "$PREFIX/libexec/proxy-trust.mjs" "$root$PREFIX/libexec/"
 cp "$PREFIX/bin/sbx-chromium" "$root$PREFIX/bin-sbx-chromium"
 for lib in libstdc++.so.6 libgcc_s.so.1; do cp -L "$PREFIX/lib/$lib" "$root$PREFIX/lib/"; done
 # Include loader and every non-C++ direct system dependency, but never a

@@ -18,6 +18,7 @@ const files=['chromium-display.yaml','chromium-display.dockerfile','tools/instal
 const hash=b=>'sha256:'+createHash('sha256').update(b).digest('hex');
 const oldDate='2026-10-01T00:00:00Z',mature='2026-11-01T00:00:00Z',young='2026-11-12T00:00:00Z';
 const oldChrome='156.0.8078.79-1~deb13u1',nextChrome='156.0.8078.90-1~deb13u2';
+const oldNss='2:3.110-1+deb13u5',nextNss='2:3.110-1+deb13u6',nss=v=>v.replace(/^\d+:/,'');
 const routes=new Map();let scenario={};let base;
 let registryEvidence={};
 function blob(obj) {
@@ -70,7 +71,18 @@ const server=http.createServer((req,res)=>{
     const versions=[...(scenario.vanished?[]:[oldChrome]),nextChrome,'157.0.1.1-1~deb13u1'];
     const text=versions.filter(v=>!(scenario.single && v===nextChrome && arch==='arm64') && !(v.startsWith('157') && arch==='arm64')).map(v=>
       'Package: chromium\nVersion: '+v+'\nArchitecture: '+arch+'\nFilename: pool/main/c/chromium/chromium_'+v+'_'+arch+'.deb\n').join('\n');
-    res.end(execFileSync('xz',['-c'],{input:text}));return;
+    // NSS: libnss3 + libnss3-tools per version; scenario flags drop pieces.
+    const nssText=[...(scenario.nssVanished?[]:[oldNss]),nextNss].flatMap(v=>['libnss3','libnss3-tools'].filter(p=>
+      !(scenario.nssPartial && v===nextNss && p==='libnss3-tools' && arch==='arm64')).map(p=>
+      'Package: '+p+'\nVersion: '+v+'\nArchitecture: '+arch+'\nFilename: pool/updates/main/n/nss/'+p+'_'+nss(v)+'_'+arch+'.deb\n')).join('\n');
+    res.end(execFileSync('xz',['-c'],{input:text+'\n'+nssText}));return;
+  }
+  if(url.endsWith('.deb') && url.includes('/n/nss/')) {
+    const current=url.includes('_'+nss(oldNss)+'_');
+    if(current && scenario.nssMissingDeb) {res.writeHead(404).end();return;}
+    const isYoung=!current && (scenario.young || scenario.nssYoungTools && url.includes('libnss3-tools_') || scenario.armYoung && url.includes('arm64'));
+    res.setHeader('Last-Modified',new Date(current?oldDate:isYoung?young:mature).toUTCString());
+    res.end();return;
   }
   if(url.endsWith('.deb')) {
     const current=url.includes(oldChrome);
@@ -155,11 +167,12 @@ try {
   let r=await run();
   assert.equal(r.report.outcome,'update',markdown(r.report));
   assert.deepEqual(bytes(r.root),r.before,'dry run leaves every pin file unchanged');
-  assert.equal(r.report.changes.length,6);
+  assert.equal(r.report.changes.length,7);
   r=await run({}, {apply:true});
   assert.equal(r.report.outcome,'update',markdown(r.report));
   assert.match(bytes(r.root)[0],/default: "156.0.8078.90"/);
   assert.match(bytes(r.root)[0],/default: "1~deb13u2"/);
+  assert.match(bytes(r.root)[0],/  nss:\n    default: "2:3.110-1\+deb13u6"/);
   assert.match(bytes(r.root)[0],/default: "1.13.0"/);
   assert.match(bytes(r.root)[2],/version=v3.0.0-m.13/);
   const basePins=bytes(r.root)[1].match(/dhi.io\/debian-base:trixie-dev@sha256:[a-f0-9]{64}/g);
@@ -200,6 +213,30 @@ try {
   ]) {
     r=await run({young:true},extra);assert.equal(r.report.outcome,'failure',markdown(r.report));
   }
+  // NSS (certutil) follows the chromium rules exactly.
+  r=await run({nssYoungTools:true});
+  assert.equal(r.report.outcome,'update',markdown(r.report));
+  assert.ok(!r.report.changes.some(c=>c.component==='nss'),'a young libnss3-tools holds the whole NSS pin');
+  assert.match(markdown(r.report),/nss 2:3.110-1\+deb13u6: cooldown/);
+  r=await run({nssPartial:true});
+  assert.ok(!r.report.changes.some(c=>c.component==='nss'),'libnss3-tools missing on arm64 skips the version');
+  assert.match(markdown(r.report),/NSS 2:3.110-1\+deb13u6: not complete/);
+  r=await run({nssVanished:true});
+  assert.equal(r.report.outcome,'update');assert.match(markdown(r.report),/MIRROR DISAPPEARANCE: current NSS/);
+  assert.ok(r.report.changes.some(c=>c.component==='nss' && c.to===nextNss));
+  r=await run({nssMissingDeb:true});
+  assert.match(markdown(r.report),/MIRROR DISAPPEARANCE: current NSS/);
+  for(const config of [{nssVanished:true,nssYoungTools:true},{nssVanished:true,nssPartial:true}]) {
+    r=await run(config,{apply:true});
+    assert.equal(r.report.outcome,'failure',markdown(r.report));
+    assert.match(r.report.error,/No eligible common NSS replacement/);
+    assert.deepEqual(bytes(r.root),r.before,'fail closed without partial edits');
+  }
+  r=await run({nssVanished:true,nssYoungTools:true},{urgentSecurityAllow:'nss='+nextNss,securityJustification:'DSA fixture: NSS',eventName:'workflow_dispatch'});
+  assert.equal(r.report.outcome,'update',markdown(r.report));
+  assert.ok(r.report.exceptions.some(e=>e.target==='nss='+nextNss));
+  r=await run({nssYoungTools:true},{urgentSecurityAllow:'nss='+nextNss});
+  assert.equal(r.report.outcome,'failure','NSS exceptions also need workflow_dispatch and a justification');
   r=await run({incompatible:true});
   assert.equal(r.report.outcome,'update');
   assert.ok(!r.report.changes.some(c=>c.component==='devtoolsMcp'));
@@ -212,11 +249,11 @@ try {
   // Normal schedule apply and default manual dry-run both pass empty inputs.
   let spawned=await cli();
   assert.equal(spawned.report.outcome,'update');
-  assert.equal(spawned.report.changes.length,6);
+  assert.equal(spawned.report.changes.length,7);
   assert.notDeepEqual(bytes(spawned.root),spawned.before);
   spawned=await cli({}, {event:'workflow_dispatch'});
   assert.equal(spawned.report.outcome,'update','manual apply accepts empty optional inputs');
-  assert.equal(spawned.report.changes.length,6);
+  assert.equal(spawned.report.changes.length,7);
   assert.notDeepEqual(bytes(spawned.root),spawned.before);
   for(const config of [{},{young:true}]) {
     spawned=await cli(config,{mode:'--dry-run',event:'workflow_dispatch'});

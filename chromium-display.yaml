@@ -70,6 +70,14 @@ args:
     pattern: '^[0-9A-Za-z.+~]+$'
     description: Debian revision of the chromium package
     buildArg: CHROMIUM_DEBIAN_REVISION
+  # The NSS build that ships certutil (libnss3-tools) and the libnss3 that
+  # Chromium and certutil load; one Debian version for both packages. Renewed
+  # weekly with the chromium pin.
+  nss:
+    default: "2:3.110-1+deb13u5"
+    pattern: '^[0-9]+:[0-9][0-9A-Za-z.+~-]*$'
+    description: Debian trixie version of libnss3 and libnss3-tools (certutil)
+    buildArg: NSS_VERSION
   devtoolsMcp:
     default: "1.12.0"
     pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
@@ -133,11 +141,15 @@ capabilities:
         # --display this does nothing, and the MCP server starts a headless
         # browser the first time an agent needs one. The socket variables are
         # declared because hook environments are deny-by-default;
-        # display.sh also finds the socket where sbx mounts it.
+        # display.sh also finds the socket where sbx mounts it. The proxy and
+        # CA variables are declared for the same reason: without them the
+        # browser would refuse to start rather than bypass the sandbox proxy.
         - command: ["/opt/sbx-chromium/bin/sbx-chrome", "--if-display"]
           user: agent
           background: true
-          env: [WAYLAND_DISPLAY, DISPLAY, XDG_RUNTIME_DIR, SBX_WAYLAND_SOCKET, SBX_CHROME_HEADLESS, SBX_CHROME_DISABLE_GPU]
+          env: [WAYLAND_DISPLAY, DISPLAY, XDG_RUNTIME_DIR, SBX_WAYLAND_SOCKET, SBX_CHROME_HEADLESS, SBX_CHROME_DISABLE_GPU,
+                HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY, http_proxy, https_proxy, all_proxy, no_proxy,
+                SSL_CERT_FILE, PROXY_CA_CERT_B64, SBX_PROXY_CA_FILE, SBX_PROXY_MODE]
           description: Open Chromium on the forwarded display
 
   # MIGRATION NOTE: v2's agentContext block, moved to a staged file and

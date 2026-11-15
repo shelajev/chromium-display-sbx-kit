@@ -10,11 +10,15 @@ export HOME=/tmp/home
 export SBX_CHROME_START_TIMEOUT=180 MCP_TEST_TIMEOUT_MS=300000
 mkdir -p "$HOME"
 unset WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR
+# The unproxied checks below must not inherit a builder's proxy; the proxy and
+# CA path is exercised against a synthetic proxy in proxy-ca-test.mjs.
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy \
+  PROXY_CA_CERT_B64 SBX_PROXY_CA_FILE SBX_PROXY_MODE
 cd "$(mktemp -d)"
 
 # 1. Nothing in the closure is missing on a base that has only glibc.
 missing=$(for f in "$PREFIX/chromium/chromium" "$PREFIX/chromium/chrome_crashpad_handler" \
-               "$PREFIX"/chromium/*.so "$PREFIX"/lib/*.so* "$PREFIX/node/bin/node"; do
+               "$PREFIX"/chromium/*.so "$PREFIX"/lib/*.so* "$PREFIX/node/bin/node" "$PREFIX/libexec/certutil"; do
   LD_LIBRARY_PATH="$PREFIX/lib" ldd "$f" 2>/dev/null | grep 'not found' | sed "s|^|$f: |"
 done | sort -u)
 if [ -n "$missing" ]; then echo "unresolved libraries:"; echo "$missing"; exit 1; fi
@@ -25,6 +29,10 @@ if [ "${1:-}" = closure ]; then
   # A plain dump-dom exercises early display probing without --headless bypass.
   (unset LD_LIBRARY_PATH; sbx-chromium --dump-dom about:blank 2>/dev/null) | grep -q '<html'
   sh /tmp/test/minimal-display.sh
+  # certutil and the NSS modules it loads by name work from the prefix alone.
+  nss=$(mktemp -d)
+  (unset LD_LIBRARY_PATH; LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/libexec/certutil" -N -d "sql:$nss" --empty-password)
+  test -s "$nss/cert9.db"
   echo "closure and early bundled-node display probe: ok"
   exit 0
 fi
@@ -85,6 +93,10 @@ sbx-chrome stop
 # negotiation and the explicit software override both render correctly.
 "$PREFIX/node/bin/node" /tmp/test/gpu-fallback-test.mjs "$PREFIX/bin/sbx-chrome" default headless
 SBX_CHROME_DISABLE_GPU=1 "$PREFIX/node/bin/node" /tmp/test/gpu-fallback-test.mjs "$PREFIX/bin/sbx-chrome" software headless
+
+# 5b. Proxy routing and CA trust: real Chromium against a synthetic
+# TLS-intercepting proxy, synthetic CAs and synthetic credentials.
+"$PREFIX/node/bin/node" /tmp/test/proxy-ca-test.mjs
 
 # 6. Registration: only agents present, idempotent, user entries preserved.
 mkdir -p fakebin "$HOME/.codex"

@@ -15,13 +15,22 @@ const prefix = path.join(dir, 'kit');
 for (const d of ['bin', 'libexec', 'node/bin', 'chromium']) fs.mkdirSync(`${prefix}/${d}`, {recursive: true});
 const installed = !!process.env.PREFIX;
 for (const f of ['display.sh', 'wayland-probe.mjs', 'lifecycle.mjs']) fs.copyFileSync(`${installed ? process.env.PREFIX+'/libexec' : source}/${f}`, `${prefix}/libexec/${f}`);
+// The proxy helper's SBX system paths point into this fixture, so the machine
+// running the test (possibly an SBX guest) never supplies a CA.
+const systemCa = `${dir}/system/proxy-ca.crt`, systemBundle = `${dir}/system/ca-certificates.crt`;
+fs.mkdirSync(`${dir}/system`);
+fs.writeFileSync(`${prefix}/libexec/proxy-trust.mjs`, fs.readFileSync(`${installed ? process.env.PREFIX+'/libexec' : source}/proxy-trust.mjs`, 'utf8')
+  .replace("'/usr/local/share/ca-certificates/proxy-ca.crt'", JSON.stringify(systemCa))
+  .replace("'/etc/ssl/certs/ca-certificates.crt'", JSON.stringify(systemBundle)));
 for (const f of ['sbx-chrome', 'sbx-chromium', 'sbx-browser-mcp']) fs.writeFileSync(`${prefix}/bin/${f}`, fs.readFileSync(`${installed ? process.env.PREFIX+'/bin' : source}/${f}`, 'utf8').replaceAll(installed ? process.env.PREFIX : '@PREFIX@', prefix), {mode: 0o755});
 fs.symlinkSync(process.execPath, `${prefix}/node/bin/node`);
 // Fake browser only for safe failure paths and one-shot argument verification.
-fs.writeFileSync(`${prefix}/chromium/chromium`, '#!/bin/sh\nprintf "%s\\n" "$@"\nexit 1\n', {mode: 0o755});
+fs.writeFileSync(`${prefix}/chromium/chromium`, '#!/bin/sh\nprintf "proxy-env=[%s]\\n" "${HTTP_PROXY:+H}${http_proxy:+h}${HTTPS_PROXY:+S}${https_proxy:+s}${ALL_PROXY:+A}${all_proxy:+a}"\nprintf "no-proxy=[%s]\\nNO-PROXY=[%s]\\n" "${no_proxy-unset}" "${NO_PROXY-unset}"\nprintf "%s\\n" "$@"\nexit 1\n', {mode: 0o755});
 const runtime = `${dir}/runtime`, display = `${dir}/display`;
 fs.mkdirSync(runtime); fs.mkdirSync(display);
-const env = {...process.env, HOME: dir, CODEX_HOME: `${dir}/.codex`, XDG_STATE_HOME: `${dir}/state`, XDG_RUNTIME_DIR: runtime, WAYLAND_DISPLAY: 'wayland-0', DISPLAY: '', SBX_WAYLAND_SOCKET: '', SBX_CHROME_HEADLESS: '', SBX_DISPLAY_RUNTIME_DIRS: `${runtime}:${display}`, PREFIX: prefix, CHROME_USER_DATA_DIR: `${dir}/profile`, SBX_CHROME_START_TIMEOUT: '3'};
+const ambient = {...process.env};
+for (const k of ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','PROXY_CA_CERT_B64','SBX_PROXY_CA_FILE','SBX_PROXY_MODE','SSL_CERT_FILE']) { delete ambient[k]; delete ambient[k.toLowerCase()]; }
+const env = {...ambient, HOME: dir, CODEX_HOME: `${dir}/.codex`, XDG_STATE_HOME: `${dir}/state`, XDG_RUNTIME_DIR: runtime, WAYLAND_DISPLAY: 'wayland-0', DISPLAY: '', SBX_WAYLAND_SOCKET: '', SBX_CHROME_HEADLESS: '', SBX_DISPLAY_RUNTIME_DIRS: `${runtime}:${display}`, PREFIX: prefix, CHROME_USER_DATA_DIR: `${dir}/profile`, SBX_CHROME_START_TIMEOUT: '3'};
 const servers = [];
 const le = os.endianness() === 'LE';
 const put = (b,v,n) => le ? b.writeUInt32LE(v,n) : b.writeUInt32BE(v,n);
@@ -196,6 +205,156 @@ exec \"${process.execPath}\" \"$@\"
     const args=JSON.parse(result.stdout);
     assert.equal(args[args.indexOf('--browserUrl')+1],'http://127.0.0.1:'+(port || '9222'));
   }
+  // Proxy routing fails closed. A fake chromium proves the browser never runs;
+  // the synthetic proxy host and secret must never reach any output.
+  fs.writeFileSync(prefix+'/bin/sbx-chrome', fs.readFileSync(`${installed ? process.env.PREFIX+'/bin' : source}/sbx-chrome`, 'utf8').replaceAll(installed ? process.env.PREFIX : '@PREFIX@', prefix), {mode: 0o755});
+  const openssl = (...a) => exec('openssl', a, {cwd: dir});
+  await openssl('req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-keyout','ca.key','-out','ca.pem','-days','2','-subj','/CN=sbx synthetic unit CA','-addext','basicConstraints=critical,CA:TRUE');
+  await openssl('req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-keyout','ca2.key','-out','ca2.pem','-days','2','-subj','/CN=sbx synthetic other CA','-addext','basicConstraints=critical,CA:TRUE');
+  await openssl('req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:P-256','-nodes','-keyout','leaf.key','-out','leaf.pem','-days','2','-subj','/CN=leaf.test','-addext','basicConstraints=critical,CA:FALSE');
+  const caPem = fs.readFileSync(`${dir}/ca.pem`, 'utf8');
+  const proxyUrl = 'http://proxy.sbx-synthetic.test:3128';
+  const proxied = {HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl, http_proxy: proxyUrl, https_proxy: proxyUrl, NO_PROXY: 'internal.example', SBX_CHROME_HEADLESS: '1'};
+  const leak = /sbx-synthetic|synthetic-secret|BEGIN CERTIFICATE/;
+  const proxyLaunch = async (extra, args = ['--headless', 'about:blank']) => {
+    try { return {code: 0, ...await exec(`${prefix}/bin/sbx-chromium`, args, {env: {...env, ...extra}})}; }
+    catch (e) { return {code: e.code, stdout: e.stdout, stderr: e.stderr}; }
+  };
+  const refused = async (extra, pattern, args) => {
+    const r = await proxyLaunch(extra, args);
+    assert.equal(r.code, 1, pattern.source); assert.equal(r.stdout, '', pattern.source);
+    assert.match(r.stderr, /proxy setup failed/); assert.match(r.stderr, pattern); assert.doesNotMatch(r.stderr, leak);
+    return r;
+  };
+  const caFile = {SBX_PROXY_CA_FILE: `${dir}/ca.pem`};
+  await refused({...proxied}, /no sandbox proxy CA found/);
+  await refused({...proxied, HTTP_PROXY: 'not a url', http_proxy: ''}, /HTTP_PROXY is not a valid URL/);
+  await refused({...proxied, HTTPS_PROXY: 'socks5://proxy.sbx-synthetic.test:1080', https_proxy: ''}, /HTTPS_PROXY must be an http/);
+  await refused({...proxied, HTTP_PROXY: 'http://user:synthetic-secret@proxy.sbx-synthetic.test:3128', http_proxy: ''}, /carries credentials/);
+  await refused({...proxied, https_proxy: 'http://other.sbx-synthetic.test:3128'}, /HTTPS_PROXY and https_proxy differ/);
+  await refused({...proxied, HTTPS_PROXY: '', https_proxy: '', ...caFile}, /without HTTPS_PROXY/);
+  await refused({...proxied, HTTP_PROXY: '', http_proxy: '', ...caFile}, /without HTTP_PROXY/);
+  await refused({...proxied, ...caFile, NO_PROXY: 'a.example,*'}, /NO_PROXY=\*/);
+  await refused({...proxied, ...caFile}, /--no-proxy-server conflicts/, ['--headless', '--no-proxy-server']);
+  await refused({...proxied, ...caFile}, /--proxy-server conflicts/, ['--headless', '--proxy-server=direct://']);
+  await refused({...proxied, SBX_PROXY_CA_FILE: `${dir}/missing.pem`}, /cannot read proxy CA/);
+  fs.writeFileSync(`${dir}/garbage.pem`, '-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydA==\n-----END CERTIFICATE-----\n');
+  await refused({...proxied, SBX_PROXY_CA_FILE: `${dir}/garbage.pem`}, /not a valid X\.509/);
+  fs.writeFileSync(`${dir}/empty.pem`, '');
+  await refused({...proxied, SBX_PROXY_CA_FILE: `${dir}/empty.pem`}, /exactly one PEM/);
+  await refused({...proxied, SBX_PROXY_CA_FILE: `${dir}/leaf.pem`}, /not a CA certificate/);
+  await refused({...proxied, PROXY_CA_CERT_B64: Buffer.from(caPem).toString('base64'), SSL_CERT_FILE: `${dir}/bundle.pem`}, /certutil is missing/);
+  fs.writeFileSync(`${dir}/bundle.pem`, `public roots\n# BEGIN docker-sandboxes proxy-ca\n${fs.readFileSync(`${dir}/ca2.pem`, 'utf8')}# END docker-sandboxes proxy-ca\n`);
+  await refused({...proxied, PROXY_CA_CERT_B64: Buffer.from(caPem).toString('base64'), SSL_CERT_FILE: `${dir}/bundle.pem`}, /sources disagree/);
+  // A CA from SBX without proxy variables means the proxy was lost on the way.
+  await refused({SBX_CHROME_HEADLESS: '1', SSL_CERT_FILE: `${dir}/bundle.pem`}, /no proxy variable reached the browser/);
+  await refused({SBX_CHROME_HEADLESS: '1', PROXY_CA_CERT_B64: 'eA=='}, /no proxy variable reached the browser/);
+  fs.copyFileSync(`${dir}/ca.pem`, systemCa);
+  await refused({SBX_CHROME_HEADLESS: '1'}, /no proxy variable reached the browser/);
+  await refused({SBX_CHROME_HEADLESS: '1', SBX_PROXY_MODE: 'proxy'}, /SBX_PROXY_MODE=proxy but none/);
+  await refused({...proxied, SBX_PROXY_MODE: 'bypass'}, /SBX_PROXY_MODE must be/);
+  // The system CA alone is a source; certutil is the next gate.
+  await refused({...proxied}, /certutil is missing/);
+  // Explicit direct mode: no proxy variables reach Chromium, --no-proxy-server does.
+  for (const args of [['--headless'], ['--headless', '--no-proxy-server']]) {
+    const direct = await proxyLaunch({...proxied, SBX_PROXY_MODE: 'direct'}, args);
+    assert.equal(direct.code, 1); assert.match(direct.stdout, /^--no-proxy-server$/m); assert.match(direct.stdout, /^proxy-env=\[\]$/m);
+    assert.match(direct.stderr, /SBX_PROXY_MODE=direct: bypassing the sandbox proxy/); assert.doesNotMatch(direct.stderr, leak);
+  }
+  fs.rmSync(systemCa);
+  // No proxy and no sandbox CA: unchanged unproxied behaviour.
+  const plain = await proxyLaunch({SBX_CHROME_HEADLESS: '1'});
+  assert.match(plain.stdout, /^--no-proxy-server$/m); assert.equal(plain.stderr, '');
+  // Version-only queries never need the proxy; version text anywhere else
+  // (a URL, a value, a version flag beside browsing work) does not exempt.
+  assert.match((await proxyLaunch({...proxied}, ['--version'])).stdout, /^--version$/m);
+  assert.match((await proxyLaunch({...proxied}, ['--product-version', '--version'])).stdout, /^--product-version$/m);
+  const invalid = {...proxied, HTTP_PROXY: 'invalid', HTTPS_PROXY: 'invalid', http_proxy: '', https_proxy: '', SBX_PROXY_CA_FILE: `${dir}/missing.pem`};
+  for (const args of [['--headless', '--dump-dom', 'data:text/html, --version '], ['--headless', '--dump-dom', 'data:text/html, --product-version '],
+      ['--headless', '--version', '--dump-dom', 'about:blank'], ['--dump-dom', 'about:blank', '--version'], ['--headless', ' --version ']]) {
+    await refused(invalid, /HTTP_PROXY is not a valid URL/, args);
+  }
+  // The lifecycle refuses before spawning, with the same reason.
+  const lifecycle = await chrome(['start'], {...proxied});
+  assert.equal(lifecycle.code, 1); assert.match(lifecycle.stderr, /proxy setup failed: no sandbox proxy CA found/); assert.doesNotMatch(lifecycle.stderr, leak);
+  // diag reports booleans, paths and a public fingerprint only.
+  const fullDiag = JSON.parse((await chrome(['diag'], {...proxied, ...caFile})).stdout);
+  assert.equal(fullDiag.running, false); assert.equal(fullDiag.proxyRunningBrowser, null, 'no browser, so nothing claimed about one');
+  const proxyDiag = fullDiag.proxyCallerEnvironment;
+  // No certutil in this fixture: the NSS state is unknown, not "not trusted".
+  assert.deepEqual({mode: proxyDiag.mode, http: proxyDiag.http, https: proxyDiag.https, all: proxyDiag.all, noProxyLoopback: proxyDiag.noProxyLoopback, nssDbHasCurrentCa: proxyDiag.nssDbHasCurrentCa, error: proxyDiag.error},
+    {mode: 'proxy', http: true, https: true, all: false, noProxyLoopback: false, nssDbHasCurrentCa: 'unknown', error: null});
+  assert.match(proxyDiag.nssProbeError, /^certutil is missing at /);
+  assert.match(proxyDiag.caSha256, /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/);
+  const failedDiag = await chrome(['diag'], {...proxied});
+  assert.equal(failedDiag.code, 0); assert.deepEqual(JSON.parse(failedDiag.stdout).proxyCallerEnvironment, {mode: 'error', error: 'no sandbox proxy CA found (SBX_PROXY_CA_FILE, ' + systemCa + ', the SBX block in the CA bundle, or PROXY_CA_CERT_B64)'});
+  assert.doesNotMatch(failedDiag.stdout + (await chrome(['diag'], {...proxied, ...caFile})).stdout, leak);
+  // The NO_PROXY text sbx-chromium exports must be exactly appliedNoProxy(),
+  // which the route identity seals. A stand-in certutil lets the fake browser
+  // be reached in proxy mode; it is removed afterwards.
+  const {appliedNoProxy} = await import(`${prefix}/libexec/proxy-trust.mjs`);
+  fs.writeFileSync(`${prefix}/libexec/certutil`, `#!/bin/sh
+db=; nick=; mode=
+while [ $# -gt 0 ]; do case "$1" in -d) db=$2; shift ;; -n) nick=$2; shift ;; -A) mode=add ;; -L) mode=list ;; -D) exit 1 ;; esac; shift; done
+dir=\${db#sql:}
+case "$mode" in
+  add) cat > "$dir/fake-ca.pem" ;;
+  list) [ -f "$dir/fake-ca.pem" ] || exit 0
+        if [ -n "$nick" ]; then cat "$dir/fake-ca.pem"; else echo 'sbx-proxy-ca   C,,'; fi ;;
+  *) touch "$dir/cert9.db" ;;
+esac
+`, {mode: 0o755});
+  for (const [upper, lower] of [['', ''], ['a.test b.test', ''], ['a.test,b.test', ''], ['', 'a.test b.test'], ['x,', 'x,'], [',,localhost', ''],
+      ['::1,127.0.0.1', ''], ['localhost 127.0.0.1', ''], ['LOCALHOST', ''], ['  a.test , b.test ', ''], ['127.0.0.1:9222', ''], ['a;b', '']]) {
+    const extra = {...proxied, ...caFile, NO_PROXY: upper, no_proxy: lower};
+    const r = await proxyLaunch(extra);
+    assert.equal(r.code, 1, `${upper}|${lower}: ${r.stderr}`);
+    const shown = name => r.stdout.match(new RegExp(`^${name}=\\[(.*)\\]$`, 'm'))[1];
+    assert.equal(shown('no-proxy'), appliedNoProxy(extra), `no_proxy for ${JSON.stringify([upper, lower])}`);
+    assert.equal(shown('NO-PROXY'), appliedNoProxy(extra), `NO_PROXY for ${JSON.stringify([upper, lower])}`);
+  }
+  fs.rmSync(`${prefix}/libexec/certutil`);
+  // Error handling: unreadable is not absent, and unexpected errors propagate.
+  // A CA bundle that exists but cannot be read may hold the only SBX marker:
+  // never none/direct. EISDIR is a real read error even for root; EACCES is
+  // exercised too when not running as root.
+  const marked = `public roots\n# BEGIN docker-sandboxes proxy-ca\n${caPem}# END docker-sandboxes proxy-ca\n`;
+  fs.mkdirSync(`${dir}/bundle-dir`);
+  await refused({SBX_CHROME_HEADLESS: '1', SSL_CERT_FILE: `${dir}/bundle-dir`}, /cannot read the CA bundle .*bundle-dir \(EISDIR\)/);
+  fs.mkdirSync(systemBundle);
+  await refused({SBX_CHROME_HEADLESS: '1'}, /cannot read the CA bundle .*ca-certificates\.crt \(EISDIR\)/);
+  fs.rmdirSync(systemBundle);
+  const root = process.getuid?.() === 0;
+  if (!root) {
+    fs.writeFileSync(`${dir}/locked.pem`, marked); fs.chmodSync(`${dir}/locked.pem`, 0o000);
+    await refused({SBX_CHROME_HEADLESS: '1', SSL_CERT_FILE: `${dir}/locked.pem`}, /cannot read the CA bundle .*locked\.pem \(EACCES\)/);
+    await refused({...proxied, SBX_PROXY_CA_FILE: `${dir}/locked.pem`}, /cannot read proxy CA .*locked\.pem \(EACCES\)/);
+    fs.chmodSync(`${dir}/system`, 0o000);
+    await refused({SBX_CHROME_HEADLESS: '1'}, /cannot check the sandbox proxy CA file .*\(EACCES\)/);
+    fs.chmodSync(`${dir}/system`, 0o755);
+  }
+  // An injected unexpected error (a TypeError while reading the bundle) is
+  // not relabelled as absence or as a refusal: it propagates, and the
+  // launcher still never starts the browser.
+  const injectTypeError = (match, message) => {
+    const file = `${dir}/inject-${message.replace(/\W/g, '')}.cjs`;
+    fs.writeFileSync(file, `const fs = require('node:fs'); const read = fs.readFileSync;
+      fs.readFileSync = function(f, ...a) { if (String(f).endsWith(${JSON.stringify(match)})) throw new TypeError(${JSON.stringify(message)}); return read.call(this, f, ...a); };`);
+    return `--require=${file}`;
+  };
+  fs.writeFileSync(`${dir}/marked.pem`, marked);
+  const injected = await proxyLaunch({SBX_CHROME_HEADLESS: '1', SSL_CERT_FILE: `${dir}/marked.pem`, NODE_OPTIONS: injectTypeError('marked.pem', 'synthetic unexpected bundle fault')});
+  assert.notEqual(injected.code, 0); assert.equal(injected.stdout, '', 'the browser must not start');
+  assert.match(injected.stderr, /TypeError: synthetic unexpected bundle fault/); assert.doesNotMatch(injected.stderr, /proxy setup failed/);
+  // NSS probe unavailable: certutil exists but cannot be executed. That is
+  // unknown with a reason, not "the database lacks the CA".
+  fs.mkdirSync(`${dir}/.pki/nssdb`, {recursive: true}); fs.writeFileSync(`${dir}/.pki/nssdb/cert9.db`, '');
+  fs.writeFileSync(`${prefix}/libexec/certutil`, '#!/bin/sh\nexit 0\n', {mode: 0o644});
+  const probeDiag = JSON.parse((await chrome(['diag'], {...proxied, ...caFile})).stdout).proxyCallerEnvironment;
+  assert.equal(probeDiag.nssDbHasCurrentCa, 'unknown'); assert.match(probeDiag.nssProbeError, /^certutil could not run \(EACCES\)$/);
+  fs.rmSync(`${prefix}/libexec/certutil`); fs.rmSync(`${dir}/.pki`, {recursive: true});
+  console.log('proxy error handling (unreadable CA inputs refuse, unexpected errors propagate, NSS probe unknown): ok');
+  console.log('proxy fail-closed, direct opt-in and diag: ok');
   console.log('display/lifecycle: ok');
 } finally {
   for(const server of servers) server.close();

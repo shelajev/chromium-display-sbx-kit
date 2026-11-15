@@ -26,7 +26,7 @@ Compose the kit onto an agent workload:
 
 ```bash
 sbx run docker.io/docker/sbx-kit-claude:2.1.278 --display \
-  --kit docker.io/olegselajev241/sbx-chromium-display:2.0.1 \
+  --kit docker.io/olegselajev241/sbx-chromium-display:2.0.2 \
   --name claude-browser .
 ```
 
@@ -34,7 +34,7 @@ Or with Codex:
 
 ```bash
 sbx run docker.io/docker/sbx-kit-codex:0.166.0 --display \
-  --kit docker.io/olegselajev241/sbx-chromium-display:2.0.1 \
+  --kit docker.io/olegselajev241/sbx-chromium-display:2.0.2 \
   --name codex-browser .
 ```
 
@@ -112,9 +112,19 @@ happen. Which sites an agent-driven browser may open is your call, not the
 kit's: allow them with `sbx policy allow network <host>` or approve requests as
 they come.
 
-The browser bypasses the sandbox's credential-injecting forward proxy and uses
-the transparent path instead, so sites present their real certificates;
-network policy still applies.
+SBX normally supplies `HTTP_PROXY`, `HTTPS_PROXY`, and its proxy certificate authority (CA), usually at `/usr/local/share/ca-certificates/proxy-ca.crt` inside the guest. Chromium uses that proxy and imports the current CA into the guest's `~/.pki/nssdb`, preserving credential injection and HTTP request rules. The default `auto` mode requires the proxy when proxy variables are configured; invalid proxy or CA inputs then prevent startup or attachment. A sandbox CA without proxy variables also causes an error. An environment with neither proxy inputs nor sandbox CA runs direct. Explicit `SBX_PROXY_MODE=proxy` always requires the proxy. To require the proxy, run this in the sandbox shell with SBX's supplied inputs intact:
+
+```sh
+SBX_PROXY_MODE=proxy sbx-chrome restart
+```
+
+A caller requiring the proxy refuses to reuse a managed browser whose recorded launch is direct, unknown, or different. Compatible reuse requires the same proxy endpoint, CA, and exact applied `NO_PROXY` bypass-list text, including the launcher's local-address additions. `auto` with configured proxy inputs and explicit `proxy` can reuse the same compatible proxied launch. A refusal keeps the browser and profile intact; there is no automatic restart. A deliberate restart with valid inputs applies the caller's settings. Invalid restart inputs preserve the existing browser, and `sbx-chrome stop` remains available.
+
+Each process has its own environment: terminal exports do not update a running browser, agent, or MCP server. The MCP server attaches to a compatible managed shared browser, or starts one using its own environment when none is running. `sbx-chrome restart` changes only the managed browser's launch environment. To change what a running agent or MCP server sees, restart that process with the intended environment too; terminal exports alone cannot repair its stale configuration.
+
+Run `sbx-chrome diag` in the sandbox shell, even with Chromium stopped. It reads only its own invocation environment, not the environment of a separate running agent or MCP server. `proxyCallerEnvironment` describes that invocation's configuration; `proxyRunningBrowser` describes the recorded browser launch and whether it matches the caller. These are configuration records, not an attestation of live network traffic. Diagnostics omit proxy URLs and credentials.
+
+Use `SBX_PROXY_MODE=direct` only for a user-requested bypass, and restart to switch an existing browser. Direct mode loses credential injection and HTTP request rules; network-level sandbox restrictions remain. Proxy injection does not keep website passwords, login cookies, or other browser-profile data out of the guest or hide them from its same-user agent.
 
 ## How it works
 
@@ -231,7 +241,7 @@ inspect locally only when needed, never export them as safe diagnostics.
 WebMCP pages should use `navigator.modelContext || document.modelContext` while
 Chromium transitions the experimental API. See [candidate verification and host
 handoff](FOUNDATION-REPORT.md) for exact build/test commands and pending native
-host/human acceptance. Proxy routing, profile security, GPU validation, and
+host/human acceptance. Profile security, GPU validation, and
 release readiness remain subsequent work packages.
 ## Weekly dependency maintenance
 
@@ -272,7 +282,7 @@ An unreachable/invalid source also fails before any pin files are written.
 For an urgent security fix, manually dispatch from `main` with `dry_run=false`,
 `urgent_security_allow` set to comma-separated **exact** targets, such as
 `chromium=156.0.8078.90-1~deb13u2`, and a nonempty `security_justification`
-naming the advisory and reason. Supported component names are `chromium`,
+naming the advisory and reason. Supported component names are `chromium`, `nss`,
 `devtoolsMcp`, `kit-tck`, `debian`, `debian-base`, and `node`; OCI targets use
 the full `sha256:…` digest. Exceptions are audited prominently in the report
 and PR and are rejected on schedules, without a reason, or when unused.
