@@ -5,7 +5,7 @@ status: in-progress
 type: task
 priority: high
 created_at: 2026-11-13T13:35:23Z
-updated_at: 2026-11-15T16:00:00Z
+updated_at: 2026-11-15T16:04:00Z
 ---
 
 Epic chromium-brow; order 3. Launcher currently unsets proxy variables and
@@ -121,3 +121,16 @@ runs is byte-identical to 995c9cb, so the round-2 Codex 0.166 runs stand.
 The reviewed copy still matches the code. At d685772, with the cache kept:
 build, smoke, proxy-ca, register-test 27/27, kit-tck 19/19, audit and CI
 checks passed.
+
+Round 7 (03c89bd). History shows every release registered exactly
+/opt/sbx-chromium/bin/sbx-browser-mcp with all four JSON clients too; the
+npx form appears only in a comment. JSON and OpenCode ownership is now the
+same exact rule as Codex. Same-name paths, chrome-devtools-mcp and npx
+entries stay byte-unchanged. An owned JSON entry is no longer replaced:
+it stays as it is, with user env and settings, as already registered.
+Basename and wholesale-replacement mutants both fail register-test (27/27
+otherwise). Codex output is still byte-identical to 995c9cb, so the round-2
+runs stand. No image was built this round; QC runs the final build. CI
+script checks passed, and the ownership audit passed on the round-6 layout.
+No build cache was removed: last-used times do not reflect cache hits, so
+they cannot select obsolete records safely (evidence/73).
