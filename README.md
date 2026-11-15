@@ -26,7 +26,7 @@ Compose the kit onto an agent workload:
 
 ```bash
 sbx run docker.io/docker/sbx-kit-claude:2.1.278 --display \
-  --kit docker.io/olegselajev241/sbx-chromium-display:2.0.2 \
+  --kit docker.io/olegselajev241/sbx-chromium-display:2.0.3 \
   --name claude-browser .
 ```
 
@@ -34,7 +34,7 @@ Or with Codex:
 
 ```bash
 sbx run docker.io/docker/sbx-kit-codex:0.166.0 --display \
-  --kit docker.io/olegselajev241/sbx-chromium-display:2.0.2 \
+  --kit docker.io/olegselajev241/sbx-chromium-display:2.0.3 \
   --name codex-browser .
 ```
 
