@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -197,8 +198,78 @@ test('a file whose strings cannot be followed with certainty is left unchanged w
   ]) {
     const { text, result } = planCodex(before, CMD);
     assert.equal(text, null, before);
-    assert.match(result, /^left alone: a multi-line or unterminated string makes the file uncertain to edit; make sure \[mcp_servers\.chrome-devtools\] lists env_vars = \["HTTP_PROXY"/);
+    assert.match(result, /^left alone: a multi-line or unterminated string, so the file is uncertain to edit; make sure \[mcp_servers\.chrome-devtools\] lists env_vars = \["HTTP_PROXY"/);
   }
+});
+
+// Every other way TOML can spell or place this server's keys. Editing any of
+// them could write a duplicate key, which makes Codex reject the whole file.
+const UNCERTAIN = [
+  ['quoted "env_vars"', `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\n"env_vars" = ["USER_CUSTOM"]\nstartup_timeout_sec = 90\n`],
+  ["quoted 'env_vars'", `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\n'env_vars' = ["USER_CUSTOM"]\nstartup_timeout_sec = 90\n`],
+  ['quoted "command"', `[mcp_servers.chrome-devtools]\n"command" = "${CMD}"\n`],
+  ['env_vars that is not an array', `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = "USER_CUSTOM"\n`],
+  ['env_vars sub-table', `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\n\n[mcp_servers.chrome-devtools.env_vars]\nx = 1\n`],
+  ['parent-table dotted keys', `[mcp_servers]\nchrome-devtools.command = "${CMD}"\nchrome-devtools.env_vars = ["USER_CUSTOM"]\n`],
+  ['parent-table inline server', `[mcp_servers]\nchrome-devtools = { command = "${CMD}", env_vars = ["USER_CUSTOM"] }\n`],
+  ['parent-table quoted inline server', `[mcp_servers]\n"chrome-devtools" = { command = "${CMD}" }\n`],
+  ['top-level inline mcp_servers', `mcp_servers = { chrome-devtools = { command = "${CMD}" } }\n`],
+  ['top-level dotted key', `mcp_servers.chrome-devtools.command = "${CMD}"\n`],
+  ['quoted header spelling', `["mcp_servers".chrome-devtools]\ncommand = "${CMD}"\n`],
+];
+
+test('any other spelling or placement of the server or its keys is left unchanged with guidance', () => {
+  for (const [label, before] of UNCERTAIN) {
+    const { text, result } = planCodex(before, CMD);
+    assert.equal(text, null, label);
+    assert.match(result, /^left alone: .*, so the file is uncertain to edit; make sure \[mcp_servers\.chrome-devtools\] lists env_vars = \["HTTP_PROXY"/, label);
+  }
+});
+
+test('quoted env_vars on disk: preserved byte-unchanged, user name kept, repeated runs never duplicate', () => {
+  const s = sandbox();
+  try {
+    for (const [, before] of UNCERTAIN.slice(0, 2)) {
+      fs.writeFileSync(s.config, before);
+      for (let run = 0; run < 2; run++) {
+        assert.match(s.run().out, /codex: left alone: /);
+        assert.equal(fs.readFileSync(s.config, 'utf8'), before);
+      }
+    }
+  } finally { s.cleanup(); }
+});
+
+test('keys that cannot be this server\'s are still edited normally', () => {
+  // A dotted key under another name, an owned env sub-table, and another
+  // server inside [mcp_servers] are unrelated to chrome-devtools' env_vars.
+  const before = `[mcp_servers]\nother = { command = "x" }\n\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nsettings.env_vars = "not ours"\nstartup_timeout_sec = 30\n\n[mcp_servers.chrome-devtools.env]\nA = "1"\n`;
+  const { text, result } = planCodex(before, CMD);
+  assert.equal(result, 'upgraded: added env_vars');
+  assert.equal(text, before.replace(`command = "${CMD}"\n`, `command = "${CMD}"\n${ENV_LINE}\n`));
+});
+
+// Every config text these tests make planCodex produce, valid TOML or not, is
+// checked with Python's tomllib when it is available (standard since 3.11).
+test('every planned Codex output is valid TOML (python3 tomllib, when present)', () => {
+  const inputs = [
+    '', 'approval_policy = "never"\n', `approval_policy = "never"\n${LEGACY}`,
+    `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = ["MY_NAME", 'HTTP_PROXY']  # mine\n`,
+    `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nenv_vars = [\n  "EXTRA",\n  "NO_PROXY",\n]\nstartup_timeout_sec = 30\n`,
+    `[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nstartup_timeout_sec = 90\ntool_timeout_sec = 120\n\n[mcp_servers.chrome-devtools.env]\nCHROME_REMOTE_DEBUGGING_PORT = "9333"\n`,
+    `${SAMPLE("'''")}\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nstartup_timeout_sec = 30\n`, SAMPLE('"""'),
+    `[mcp_servers]\nother = { command = "x" }\n\n[mcp_servers.chrome-devtools]\ncommand = "${CMD}"\nsettings.env_vars = "not ours"\n`,
+    ...UNCERTAIN.map(([, t]) => t),
+  ];
+  // Inputs are checked too, so a fixture cannot be invalid TOML by mistake.
+  const outputs = [...inputs, ...inputs.map(t => planCodex(t, CMD).text ?? t)];
+  const check = spawnSync('python3', ['-I', '-c', 'import json,sys,tomllib\nfor i,t in enumerate(json.load(sys.stdin)):\n  try: tomllib.loads(t)\n  except tomllib.TOMLDecodeError as e: print(i, e); sys.exit(1)'],
+    { input: JSON.stringify(outputs), encoding: 'utf8' });
+  if (check.error?.code === 'ENOENT' || /No module named 'tomllib'/.test(check.stderr)) {
+    process.stdout.write('  (python3 tomllib not available; TOML validity not checked)\n');
+    return;
+  }
+  if (check.error) throw check.error;
+  assert.equal(check.status, 0, `invalid TOML output: ${check.stdout}${check.stderr}`);
 });
 
 test('names that appear only in a comment are not forwarded and never count as registered', () => {

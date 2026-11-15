@@ -196,22 +196,67 @@ function scanArray(lines, row, col) {
   return null;
 }
 
+// Statements this script does not model and that could define this server,
+// its command or its env_vars a second way: quoted or dotted spellings of
+// those keys, a non-array env_vars, a second copy of the table, sub-tables
+// named after those keys, a [mcp_servers] table or root key defining the
+// server, or an inline mcp_servers table. Editing then could write a
+// duplicate key, so any of them makes the file uncertain: returns the reason,
+// or null. Within the owned table only `ownedFrom..ownedTo` lines are checked.
+const MCP_TABLE = /^\s*\[\s*(?:mcp_servers|"mcp_servers"|'mcp_servers')\s*\]\s*(?:#.*)?$/;
+const OWNED_SUBTABLE = /^\s*\[\s*mcp_servers\s*\.\s*(?:chrome-devtools|"chrome-devtools"|'chrome-devtools')\s*\.\s*([A-Za-z0-9_-]+)\s*\]\s*(?:#.*)?$/;
+const QUOTED_KEY = /^\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*[.=]/;
+const BARE_KEY = /^\s*([A-Za-z0-9_-]+)\s*([.=])/;
+function ambiguity(lines, atStatement, ownedFrom, ownedTo) {
+  let table = null, headers = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!atStatement[i]) continue;
+    const t = lines[i].replace(/\r$/, '');
+    if (/^\s*\[/.test(t)) {
+      table = t;
+      if (CODEX_HEADER.test(t) && ++headers > 1) return `there are two [mcp_servers.${NAME}] tables`;
+      if (/mcp_servers/.test(t) && /chrome-devtools/.test(t) && !CODEX_HEADER.test(t)) {
+        const sub = OWNED_SUBTABLE.exec(t);
+        if (!sub || sub[1] === 'env_vars' || sub[1] === 'command') return `'${NAME}' is also defined by another table header`;
+      }
+      continue;
+    }
+    if (i > ownedFrom && i < ownedTo) {
+      if (QUOTED_KEY.test(t)) return `the '${NAME}' table has a quoted key`;
+      const key = BARE_KEY.exec(t);
+      if (key && (key[1] === 'env_vars' || key[1] === 'command') && (key[2] === '.' || (key[1] === 'env_vars' && !ENV_VARS_KEY.test(t))))
+        return `the '${NAME}' table sets ${key[1]} in a form this script does not edit`;
+      continue;
+    }
+    const key = /^\s*([^=#[\]{]+?)\s*=/.exec(t);
+    if (!key) continue;
+    if (table === null && /mcp_servers/.test(key[1])) return 'mcp_servers is set by a top-level key';
+    if (table !== null && MCP_TABLE.test(table) && /chrome-devtools/.test(key[1])) return `'${NAME}' is set inside [mcp_servers]`;
+  }
+  return null;
+}
+
 // What to do with the Codex config text. Returns {text, result}; text is null
 // when the file must not be written.
 export function planCodex(text, command) {
   const fresh = `[mcp_servers.${NAME}]\ncommand = ${JSON.stringify(command)}\nstartup_timeout_sec = 30\nenv_vars = ${tomlArray(ENV_NAMES)}\n`;
   const lines = text.split('\n');
   const atStatement = statementLines(text);
-  if (!atStatement) return { text: null, result: `left alone: a multi-line or unterminated string makes the file uncertain to edit; make sure [mcp_servers.${NAME}] lists env_vars = ${tomlArray(ENV_NAMES)}` };
+  const unsure = why => ({ text: null, result: `left alone: ${why}, so the file is uncertain to edit; make sure [mcp_servers.${NAME}] lists env_vars = ${tomlArray(ENV_NAMES)}` });
+  if (!atStatement) return unsure('a multi-line or unterminated string');
   const isLine = (re, i) => atStatement[i] && re.test(lines[i].replace(/\r$/, ''));
   const start = lines.findIndex((_, i) => isLine(CODEX_HEADER, i));
   if (start < 0) {
+    const why = ambiguity(lines, atStatement, -1, -1);
+    if (why) return unsure(why);
     // A new table at the end of the file cannot capture keys that belong to
     // another one; the file ends outside any string (checked above).
     return { text: text + (text && !text.endsWith('\n') ? '\n' : '') + '\n' + fresh, result: 'registered' };
   }
   let end = lines.findIndex((_, i) => i > start && isLine(ANY_HEADER, i));
   if (end < 0) end = lines.length;
+  const why = ambiguity(lines, atStatement, start, end);
+  if (why) return unsure(why);
   const cmdRow = lines.findIndex((_, i) => i > start && i < end && isLine(COMMAND_KEY, i));
   if (cmdRow < 0 || !isOurCommand(tomlString(COMMAND_KEY.exec(lines[cmdRow])[1]), command)) return { text: null, result: `left alone: the existing '${NAME}' entry runs a different command` };
 
