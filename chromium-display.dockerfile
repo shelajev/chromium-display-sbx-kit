@@ -43,7 +43,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # debian:trixie carries no CA store, and apt goes over HTTPS here: plain HTTP
 # to the mirrors is the first thing a locked-down egress policy refuses.
-COPY --from=dhi.io/debian-base:trixie-dev@sha256:f18a569e4ed47f382ef551fac547bddcaa050f74565dfe35ba73958810fb8525 \
+COPY --from=dhi.io/debian-base:trixie-dev@sha256:3a0f849e7ecad5433a8a517e4606794dc65941b275177c7f44002c3fc322d7a8 \
      /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources
 
@@ -163,7 +163,7 @@ EOF
 # glibc and almost nothing else — no fonts, no X/Wayland libraries, no NSS —
 # so anything the closure missed fails here instead of in a user's sandbox.
 # The final stage copies from this one, so what ships is what passed.
-FROM dhi.io/debian-base:trixie-dev@sha256:f18a569e4ed47f382ef551fac547bddcaa050f74565dfe35ba73958810fb8525 AS test
+FROM dhi.io/debian-base:trixie-dev@sha256:3a0f849e7ecad5433a8a517e4606794dc65941b275177c7f44002c3fc322d7a8 AS test
 ARG PREFIX
 ARG CHROMIUM_VERSION
 ARG DEVTOOLS_MCP_VERSION
